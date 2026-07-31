@@ -134,7 +134,22 @@ mod tests {
     /// cascade now loads successfully instead of erroring.
     #[test]
     fn an_entirely_empty_cascade_loads_successfully_with_defaults() {
-        let config = load_config(Map::new()).unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+        }
+        let config = load_config(Map::new());
+        if let Some(prev) = prev_home {
+            unsafe {
+                std::env::set_var("HOME", prev);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("HOME");
+            }
+        }
+        let config = config.unwrap();
         assert_eq!(config.url, "");
         assert_eq!(config.firecrawl_base_url, "https://api.firecrawl.dev");
         assert_eq!(config.auth_method, AuthMethod::Pat);

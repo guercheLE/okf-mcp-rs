@@ -46,7 +46,7 @@ fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
             adapter_kind: AdapterKind::Ollama,
             api_key_env: None,
             base_url_env: Some("OLLAMA_HOST"),
-            default_base_url: Some("http://localhost:11434"),
+            default_base_url: Some("http://localhost:11434/"),
         },
         // Any other OpenAI-compatible endpoint (self-hosted vLLM, etc.) —
         // reuses the OpenAI adapter's wire protocol against a custom URL.
@@ -130,7 +130,7 @@ impl LLMCompilerDriver {
             None => AuthData::None,
         };
 
-        let base_url = base_url_override
+        let mut base_url = base_url_override
             .map(str::to_string)
             .or_else(|| {
                 spec.base_url_env
@@ -143,6 +143,13 @@ impl LLMCompilerDriver {
                     spec.base_url_env.unwrap_or("its base URL")
                 )
             })?;
+
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            base_url = format!("http://{base_url}");
+        }
+        if !base_url.ends_with('/') {
+            base_url.push('/');
+        }
         let endpoint = Endpoint::from_owned(base_url);
 
         let target = ServiceTarget {
@@ -211,6 +218,12 @@ mod tests {
         for provider in ["anthropic", "openai", "groq", "ollama", "custom"] {
             assert!(provider_spec(provider).is_ok(), "{provider} should resolve");
         }
+    }
+
+    #[test]
+    fn ollama_default_base_url_ends_with_slash() {
+        let spec = provider_spec("ollama").unwrap();
+        assert_eq!(spec.default_base_url, Some("http://localhost:11434/"));
     }
 
     #[test]
