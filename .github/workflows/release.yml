@@ -1,0 +1,73 @@
+name: Release artifacts
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: cargo-dist (${{ matrix.target }})
+    # A hung test (or any other stuck step) would otherwise fall back to
+    # GitHub's own 6-hour job ceiling — the slowest of these targets
+    # normally finishes in under 20 minutes, so 45 gives headroom for a
+    # slow/cold-cache run without leaving a hang to eat hours of CI time.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.9.1
+      - name: Install cargo-dist
+        # Prebuilt-binary installer rather than `cargo install cargo-dist
+        # --locked` (which compiled it from source on every run, several
+        # minutes even on Linux/macOS and roughly double that on Windows)
+        # -- cargo-dist publishes and recommends these installer scripts
+        # for exactly this use case. Installs to the same $CARGO_HOME/bin
+        # already on PATH, so no further setup is needed.
+        if: runner.os != 'Windows'
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - name: Install cargo-dist (Windows)
+        if: runner.os == 'Windows'
+        run: powershell -ExecutionPolicy Bypass -c "irm https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.ps1 | iex"
+      - name: Verify
+        run: cargo test --locked
+      - name: Verify DHAT profiling lifecycle
+        run: cargo test --locked --features profiling --test cli_smoke profiling_feature_records_warmed_search_and_non_search_commands -- --exact
+      - name: Build archives and installers
+        run: dist build --artifacts=local --target=${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: target/distrib/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: artifacts
+      - uses: softprops/action-gh-release@v3.0.1
+        with:
+          files: artifacts/*

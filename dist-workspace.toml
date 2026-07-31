@@ -1,0 +1,25 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell", "powershell"]
+# ONNX Runtime does not provide an x86_64-apple-darwin prebuilt binary.
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+install-path = "CARGO_HOME"
+install-updater = false
+# fastembed/ort Windows binaries use the dynamic CRT.
+msvc-crt-static = false
+# release.yml.tera is a deliberately simplified hand-written workflow (one
+# job, no plan/host/announce split) rather than dist's own multi-job
+# auto-generated shape -- `dist host --steps=create` (the release-tag
+# trigger) refuses to run against a workflow file it doesn't recognize as
+# its own output ("has out of date contents and needs to be regenerated"),
+# failing every real release. This tells dist the divergence is
+# intentional instead of stale.
+allow-dirty = ["ci"]
+
+[dist.github-custom-runners]
+# ONNX Runtime requires glibc >= 2.38.
+x86_64-unknown-linux-gnu = "ubuntu-24.04"

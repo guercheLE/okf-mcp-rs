@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+  echo "error: cargo-llvm-cov not found. Install it with:" >&2
+  echo "  cargo install cargo-llvm-cov" >&2
+  echo "  rustup component add llvm-tools-preview" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: python3 is required to calculate production-only coverage" >&2
+  exit 1
+fi
+
+mkdir -p target/coverage
+cargo llvm-cov --lcov --output-path target/coverage/lcov.info
+cargo llvm-cov report --html --output-dir target/coverage
+python3 scripts/check_production_coverage.py \
+  target/coverage/lcov.info \
+  target/coverage/production-lcov.info \
+  --minimum 70
+
+echo
+echo "Coverage written to:"
+echo "  target/coverage/lcov.info      (machine-readable)"
+echo "  target/coverage/production-lcov.info (production-only gate input)"
+echo "  target/coverage/html/index.html (human-readable)"

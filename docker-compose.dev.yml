@@ -1,0 +1,18 @@
+services:
+  okf-mcp-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: okf-mcp:dev
+    command: ["http", "--host", "0.0.0.0", "--port", "3000"]
+    env_file:
+      - .env
+    environment:
+      OKF_MCP_TRANSPORT: http
+      OKF_MCP_PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dev-vault:/vault
+      - ~/.okf-mcp:/root/.okf-mcp
+      - ~/.config/okf:/root/.config/okf
