@@ -50,11 +50,16 @@ okf-mcp search "what did that article say about X"
 A **vault** is any directory with a `.okf/` marker — the CLI resolves which one to use, in order: an explicit `--vault <name|path>` flag (global, works on every subcommand) → walking up from the current directory looking for `.okf/` → the registry's default vault.
 
 ```bash
-okf-mcp vault add ~/Vaults/Personal --name personal --description "Personal notes"
+okf-mcp vault create ~/Vaults/Personal --name personal --description "Personal notes"  # scaffold a brand-new vault
+okf-mcp vault add ~/Vaults/Existing --name existing     # register an existing .okf/ directory instead
 okf-mcp vault default personal
 okf-mcp vault list
+okf-mcp vault remove existing        # unregister only — the directory is untouched
+okf-mcp vault delete personal --force   # unregister AND permanently delete the directory
 okf-mcp search "kubernetes" --all-vaults          # federated search across every registered vault
 ```
+
+`vault` is also reachable as `kb` — same commands, two names for two audiences (`vault` for Obsidian-oriented workflows, `kb` for OKF-oriented ones): `okf-mcp kb list` behaves identically to `okf-mcp vault list`.
 
 The registry lives at `~/.config/okf/vaults.toml` — deliberately separate from `~/.okf-mcp/` (this binary's own settings), since it's a convention other OKF-format tools could reasonably also read. Every operation is sandboxed to its resolved vault root; an MCP tool call scoped to one vault cannot read or write another's files.
 
@@ -72,7 +77,7 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 | `search` | `<query> [-l/--limit] [--json] [--all-vaults]` | Search ingested raw sources and compiled wiki concepts |
 | `delete` | `<URL\|FILE> [--purge]` | Remove a source from the vault (soft by default; `--purge` hard-deletes) |
 | `run` | `<URL\|FILE> [--tag] [--model]` | Ingest, compile, lint, and commit as one step |
-| `vault list` / `vault add` / `vault default` | — | Manage the vault registry |
+| `vault list` / `add` / `create` / `remove` (`rm`) / `delete` / `default` | — | Manage vaults / knowledge bases — also reachable as `kb ...` |
 | `setup` | — | Configure the Firecrawl API key and an LLM provider key |
 | `test-connection` | — | Verify the configured Firecrawl API key is reachable |
 | `config` | — | Print the resolved configuration (secrets redacted) |

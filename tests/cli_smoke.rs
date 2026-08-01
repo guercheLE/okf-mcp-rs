@@ -106,6 +106,107 @@ fn vault_add_list_and_default_round_trip() {
 }
 
 #[test]
+fn vault_create_scaffolds_a_new_vault_and_registers_it() {
+    let home = tempfile::tempdir().unwrap();
+    let new_vault = tempfile::tempdir().unwrap();
+
+    let create = okf_mcp(
+        &[
+            "vault",
+            "create",
+            new_vault.path().to_str().unwrap(),
+            "--name",
+            "created-vault",
+        ],
+        home.path(),
+    );
+    assert!(create.status.success(), "stderr: {}", stderr(&create));
+    assert!(new_vault.path().join(".okf").is_dir());
+    assert!(new_vault.path().join("wiki/concepts").is_dir());
+    assert!(new_vault.path().join("raw").is_dir());
+
+    let list = okf_mcp(&["vault", "list"], home.path());
+    assert!(stdout(&list).contains("created-vault"));
+
+    // Re-running `create` against the now-non-empty path fails, pointing
+    // at `vault add` for adopting an existing directory instead.
+    let create_again = okf_mcp(
+        &[
+            "vault",
+            "create",
+            new_vault.path().to_str().unwrap(),
+            "--name",
+            "created-vault-again",
+        ],
+        home.path(),
+    );
+    assert!(!create_again.status.success());
+    assert!(stderr(&create_again).contains("vault add"));
+}
+
+#[test]
+fn vault_delete_requires_force_and_removes_the_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let vault_dir = tempfile::tempdir().unwrap();
+    make_vault(vault_dir.path());
+
+    let add = okf_mcp(
+        &[
+            "vault",
+            "add",
+            vault_dir.path().to_str().unwrap(),
+            "--name",
+            "delete-me",
+        ],
+        home.path(),
+    );
+    assert!(add.status.success(), "stderr: {}", stderr(&add));
+
+    let delete_without_force = okf_mcp(&["vault", "delete", "delete-me"], home.path());
+    assert!(!delete_without_force.status.success());
+    assert!(vault_dir.path().is_dir());
+
+    let delete_with_force = okf_mcp(&["vault", "delete", "delete-me", "--force"], home.path());
+    assert!(
+        delete_with_force.status.success(),
+        "stderr: {}",
+        stderr(&delete_with_force)
+    );
+    assert!(!vault_dir.path().exists());
+
+    let list_after_delete = okf_mcp(&["vault", "list"], home.path());
+    assert!(!stdout(&list_after_delete).contains("delete-me"));
+}
+
+#[test]
+fn kb_is_a_full_alias_for_vault() {
+    let home = tempfile::tempdir().unwrap();
+    let vault_dir = tempfile::tempdir().unwrap();
+    make_vault(vault_dir.path());
+
+    let add_via_kb = okf_mcp(
+        &[
+            "kb",
+            "add",
+            vault_dir.path().to_str().unwrap(),
+            "--name",
+            "kb-alias-vault",
+        ],
+        home.path(),
+    );
+    assert!(
+        add_via_kb.status.success(),
+        "stderr: {}",
+        stderr(&add_via_kb)
+    );
+
+    let kb_list = okf_mcp(&["kb", "list"], home.path());
+    let vault_list = okf_mcp(&["vault", "list"], home.path());
+    assert_eq!(stdout(&kb_list), stdout(&vault_list));
+    assert!(stdout(&kb_list).contains("kb-alias-vault"));
+}
+
+#[test]
 fn ingest_lint_reindex_search_and_delete_round_trip_a_local_file() {
     let home = tempfile::tempdir().unwrap();
     let vault_dir = tempfile::tempdir().unwrap();

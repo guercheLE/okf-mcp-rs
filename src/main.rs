@@ -111,8 +111,10 @@ enum Command {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Manage the vault registry (~/.config/okf/vaults.toml)
-    #[command(subcommand)]
+    /// Manage vaults / knowledge bases (~/.config/okf/vaults.toml) — alias:
+    /// `kb`. `vault` and `kb` are the same commands under two names: `vault`
+    /// for Obsidian-oriented workflows, `kb` for OKF-oriented ones.
+    #[command(subcommand, alias = "kb")]
     Vault(VaultCommand),
     /// Start the MCP server over stdio (for agent hosts)
     Start,
@@ -137,8 +139,16 @@ enum Command {
 enum VaultCommand {
     /// List registered vaults
     List,
-    /// Register a vault
+    /// Register an existing vault directory
     Add {
+        path: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Scaffold a brand-new vault directory (.okf/, wiki/concepts/, raw/) and register it
+    Create {
         path: String,
         #[arg(long)]
         name: String,
@@ -148,6 +158,12 @@ enum VaultCommand {
     /// Remove a vault from the registry (~/.config/okf/vaults.toml)
     #[command(alias = "rm")]
     Remove { name: String },
+    /// Unregister a vault AND permanently delete its directory tree (destructive — requires --force)
+    Delete {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
     /// Set the default vault
     Default { name: String },
 }
@@ -256,7 +272,13 @@ async fn main() -> anyhow::Result<()> {
             name,
             description,
         }) => cli::vault::add(&path, &name, description.as_deref()),
+        Command::Vault(VaultCommand::Create {
+            path,
+            name,
+            description,
+        }) => cli::vault::create(&path, &name, description.as_deref()),
         Command::Vault(VaultCommand::Remove { name }) => cli::vault::remove(&name),
+        Command::Vault(VaultCommand::Delete { name, force }) => cli::vault::delete(&name, force),
         Command::Vault(VaultCommand::Default { name }) => cli::vault::default(&name),
         Command::Start => {
             // SAFETY: single-threaded at this point, before `#[tokio::main]`

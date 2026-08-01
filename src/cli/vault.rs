@@ -1,8 +1,11 @@
-// `okf-mcp vault list|add|default` — manages `~/.config/okf/vaults.toml`.
+// `okf-mcp vault list|add|create|remove|delete|default` — manages
+// `~/.config/okf/vaults.toml`. Also reachable as `okf-mcp kb ...` (see
+// `main.rs`'s `Command::Vault` alias) — same commands, two names.
 
 use std::path::PathBuf;
 
 use okf_mcp::core::vault_registry::{VaultEntry, VaultRegistry};
+use okf_mcp::manifest::{self, Manifest};
 
 pub fn list() -> anyhow::Result<()> {
     let registry = VaultRegistry::load()?;
@@ -43,6 +46,33 @@ pub fn add(path: &str, name: &str, description: Option<&str>) -> anyhow::Result<
     Ok(())
 }
 
+/// Scaffolds a brand-new vault directory (`.okf/`, `wiki/concepts/`,
+/// `raw/`) and registers it — distinct from `add`, which only registers
+/// an existing directory. Refuses to touch a `path` that already exists
+/// and is non-empty, to avoid silently adopting/overwriting content that
+/// wasn't necessarily meant to become a vault.
+pub fn create(path: &str, name: &str, description: Option<&str>) -> anyhow::Result<()> {
+    let root = PathBuf::from(path);
+    let non_empty = std::fs::read_dir(&root)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if non_empty {
+        anyhow::bail!(
+            "'{path}' already exists and is not empty — use `okf-mcp vault add {path} --name {name}` \
+             to register an existing vault instead"
+        );
+    }
+
+    std::fs::create_dir_all(root.join("wiki/concepts"))?;
+    std::fs::create_dir_all(root.join("raw"))?;
+    // Creates `.okf/` and writes an empty manifest.json.
+    manifest::store::save(&root, &Manifest::default())?;
+
+    add(path, name, description)?;
+    println!("Created vault '{name}' at {path}");
+    Ok(())
+}
+
 pub fn remove(name: &str) -> anyhow::Result<()> {
     let mut registry = VaultRegistry::load()?;
     if registry.vaults.remove(name).is_none() {
@@ -53,6 +83,38 @@ pub fn remove(name: &str) -> anyhow::Result<()> {
     }
     registry.save()?;
     println!("Removed vault '{name}' from registry.");
+    Ok(())
+}
+
+/// Unregisters `name` AND permanently deletes its directory tree.
+/// Destructive — requires `--force` (surfaced here as `force: bool`, not
+/// an interactive confirmation, since this is a scriptable CLI) or bails
+/// with a clear message. Deletes the directory *before* unregistering: if
+/// `remove_dir_all` fails partway (permissions, a locked file), the vault
+/// stays registered and the delete is safely retryable, rather than
+/// leaving a registered entry with no backing directory.
+pub fn delete(name: &str, force: bool) -> anyhow::Result<()> {
+    let registry = VaultRegistry::load()?;
+    let entry = registry
+        .vaults
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("no vault named '{name}' is registered"))?;
+    let path = entry.path.clone();
+
+    if !force {
+        anyhow::bail!(
+            "refusing to delete vault '{name}' ({}) without --force — this permanently deletes \
+             the directory and everything in it",
+            path.display()
+        );
+    }
+
+    println!("Deleting {} ...", path.display());
+    if path.is_dir() {
+        std::fs::remove_dir_all(&path)?;
+    }
+    remove(name)?;
+    println!("Deleted vault '{name}' and its directory.");
     Ok(())
 }
 
