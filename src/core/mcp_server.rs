@@ -228,6 +228,7 @@ impl OkfServer {
             let options = CompileOptions {
                 temperature: args.temperature,
                 base_url_override: args.base_url_override,
+                ..Default::default()
             };
             let diff_only = args.diff.unwrap_or(true);
             let output = Output::for_transport(transport);
@@ -254,6 +255,7 @@ impl OkfServer {
             let options = CompileOptions {
                 temperature: args.temperature,
                 base_url_override: args.base_url_override,
+                ..Default::default()
             };
             let diff_only = !args.force.unwrap_or(false);
             let output = Output::for_transport(transport);

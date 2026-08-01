@@ -1,7 +1,7 @@
 // `okf-mcp run <URL|FILE>`: ingest, compile, lint, and commit as one step.
 
 use okf_mcp::auth::auth_manager::AuthManager;
-use okf_mcp::compiler::{self, CompileOptions};
+use okf_mcp::compiler;
 use okf_mcp::core::config_manager::load_config;
 use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_resolver::resolve_vault;
@@ -29,13 +29,8 @@ pub async fn run(
     ));
 
     let model_spec = compiler::resolve_model_spec(&vault_root, model)?;
-    let compile_report = compiler::compile(
-        &vault_root,
-        &model_spec,
-        true,
-        &CompileOptions::default(),
-        Some(&output),
-    )
-    .await?;
+    let options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+    let compile_report =
+        compiler::compile(&vault_root, &model_spec, true, &options, Some(&output)).await?;
     report_and_commit(&vault_root, &compile_report, "okf-mcp run")
 }

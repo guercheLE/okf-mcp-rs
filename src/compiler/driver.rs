@@ -21,6 +21,7 @@ use super::provider::LLMCompilerDriver;
 pub struct CompileOptions {
     pub temperature: Option<f32>,
     pub base_url_override: Option<String>,
+    pub api_key_env_override: Option<String>,
 }
 
 #[derive(Debug)]
@@ -59,6 +60,26 @@ pub fn resolve_model_spec(vault_root: &Path, explicit: Option<&str>) -> anyhow::
             "no model specified — pass --model <provider>/<model>, or set \
              [compiler].default_model in .okf/config.toml"
         )
+    })
+}
+
+/// Resolves `.okf/config.toml`'s `[providers.<provider>]` entry (if any)
+/// for `model_spec`'s provider into a `CompileOptions` override — the
+/// vault-level counterpart to `--model`/MCP `base_url_override`/etc.
+/// `provider_spec`'s own hardcoded env-var names/defaults still apply
+/// whenever the vault has no matching `[providers.<name>]` entry (returns
+/// `CompileOptions::default()` in that case, today's exact behavior).
+pub fn vault_provider_options(
+    vault_root: &Path,
+    model_spec: &str,
+) -> anyhow::Result<CompileOptions> {
+    let (provider, _) = super::provider::parse_model_spec(model_spec)?;
+    let vault_config = load_vault_config(vault_root)?;
+    let provider_config = vault_config.providers.get(provider);
+    Ok(CompileOptions {
+        temperature: None,
+        base_url_override: provider_config.and_then(|p| p.base_url.clone()),
+        api_key_env_override: provider_config.and_then(|p| p.api_key_env.clone()),
     })
 }
 
@@ -183,6 +204,7 @@ async fn compile_one_source(
             &user_prompt,
             options.temperature,
             options.base_url_override.as_deref(),
+            options.api_key_env_override.as_deref(),
         )
         .await?;
     let payload = parse_compile_payload(&response)?;
@@ -350,6 +372,51 @@ mod tests {
     fn resolve_model_spec_errors_when_nothing_is_configured() {
         let vault = tempfile::tempdir().unwrap();
         assert!(resolve_model_spec(vault.path(), None).is_err());
+    }
+
+    #[test]
+    fn vault_provider_options_reads_the_matching_providers_base_url_and_api_key_env() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        std::fs::write(
+            vault.path().join(".okf/config.toml"),
+            "[providers.custom]\napi_key_env = \"MY_CUSTOM_KEY\"\nbase_url = \"http://localhost:9999\"\n",
+        )
+        .unwrap();
+
+        let options = vault_provider_options(vault.path(), "custom/some-model").unwrap();
+        assert_eq!(
+            options.base_url_override.as_deref(),
+            Some("http://localhost:9999")
+        );
+        assert_eq!(
+            options.api_key_env_override.as_deref(),
+            Some("MY_CUSTOM_KEY")
+        );
+        assert_eq!(options.temperature, None);
+    }
+
+    #[test]
+    fn vault_provider_options_is_empty_for_a_provider_with_no_matching_entry() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        std::fs::write(
+            vault.path().join(".okf/config.toml"),
+            "[providers.custom]\napi_key_env = \"MY_CUSTOM_KEY\"\n",
+        )
+        .unwrap();
+
+        let options = vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
+        assert_eq!(options.base_url_override, None);
+        assert_eq!(options.api_key_env_override, None);
+    }
+
+    #[test]
+    fn vault_provider_options_is_empty_for_a_vault_with_no_config_at_all() {
+        let vault = tempfile::tempdir().unwrap();
+        let options = vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
+        assert_eq!(options.base_url_override, None);
+        assert_eq!(options.api_key_env_override, None);
     }
 
     fn write_concept(vault_root: &Path, slug: &str, sources: &[&str]) {

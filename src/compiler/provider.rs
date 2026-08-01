@@ -129,15 +129,20 @@ impl LLMCompilerDriver {
         user_prompt: &str,
         temperature: Option<f32>,
         base_url_override: Option<&str>,
+        api_key_env_override: Option<&str>,
     ) -> anyhow::Result<String> {
         let (provider, model_name) = parse_model_spec(full_model_spec)?;
         let spec = provider_spec(provider)?;
 
-        if let Some(env_name) = spec.api_key_env {
+        // A vault's `.okf/config.toml` [providers.<name>].api_key_env, if
+        // set, takes precedence over the hardcoded default for this provider.
+        let api_key_env = api_key_env_override.or(spec.api_key_env);
+
+        if let Some(env_name) = api_key_env {
             seed_env_from_credential_storage(env_name, provider);
         }
 
-        let auth = match spec.api_key_env {
+        let auth = match api_key_env {
             Some(env_name) => AuthData::from_env(env_name),
             None => AuthData::None,
         };

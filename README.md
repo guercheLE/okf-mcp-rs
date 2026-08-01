@@ -155,6 +155,12 @@ See `.env.example` for the full list. `--model` always requires an explicit `<pr
 default_model = "anthropic/claude-3-5-sonnet"
 temperature = 0.2
 max_tokens = 4096
+
+# Per-provider overrides — CLI compile/rebuild/run only (an MCP call's own
+# base_url_override argument, if supplied, still wins over this).
+[providers.custom]
+api_key_env = "MY_CUSTOM_KEY"
+base_url = "https://my-openai-compatible-endpoint.example/v1"
 ```
 
 ## Docker

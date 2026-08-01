@@ -1,6 +1,6 @@
 // Standalone `okf-mcp compile` command.
 
-use okf_mcp::compiler::{self, CompileOptions};
+use okf_mcp::compiler;
 use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_resolver::resolve_vault;
 use okf_mcp::storage::{bundle, git};
@@ -19,14 +19,8 @@ pub async fn run(model: Option<&str>, diff: bool, vault: Option<&str>) -> anyhow
         return Ok(());
     }
 
-    let report = compiler::compile(
-        &vault_root,
-        &model_spec,
-        true,
-        &CompileOptions::default(),
-        Some(&output),
-    )
-    .await?;
+    let options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+    let report = compiler::compile(&vault_root, &model_spec, true, &options, Some(&output)).await?;
     report_and_commit(&vault_root, &report, "okf-mcp compile")
 }
 

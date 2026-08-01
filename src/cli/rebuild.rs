@@ -1,6 +1,6 @@
 // Standalone `okf-mcp rebuild` command.
 
-use okf_mcp::compiler::{self, CompileOptions};
+use okf_mcp::compiler;
 use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_resolver::resolve_vault;
 
@@ -15,13 +15,8 @@ pub async fn run(model: Option<&str>, force: bool, vault: Option<&str>) -> anyho
     // underlying `compiler::compile` call, just under this command's name.
     let diff_only = !force;
     let output = Output::cli();
-    let report = compiler::compile(
-        &vault_root,
-        &model_spec,
-        diff_only,
-        &CompileOptions::default(),
-        Some(&output),
-    )
-    .await?;
+    let options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+    let report =
+        compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output)).await?;
     report_and_commit(&vault_root, &report, "okf-mcp rebuild")
 }
