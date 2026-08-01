@@ -57,8 +57,69 @@ fn version_help_and_config_are_available() {
     assert!(config.status.success());
     let config_json: serde_json::Value = serde_json::from_str(&stdout(&config)).unwrap();
     assert_eq!(
-        config_json["firecrawl_base_url"],
+        config_json["resolved"]["firecrawl_base_url"],
         "https://api.firecrawl.dev"
+    );
+}
+
+#[test]
+fn config_groups_output_by_source_and_never_leaks_credential_values() {
+    let home = tempfile::tempdir().unwrap();
+
+    let config = okf_mcp(&["config"], home.path());
+    assert!(config.status.success(), "stderr: {}", stderr(&config));
+    let config_json: serde_json::Value = serde_json::from_str(&stdout(&config)).unwrap();
+
+    for key in [
+        "global_config_file",
+        "local_config_file",
+        "env_vars",
+        "vault_config",
+        "credentials",
+        "resolved",
+    ] {
+        assert!(
+            config_json.get(key).is_some(),
+            "expected top-level '{key}' in config output: {config_json}"
+        );
+    }
+
+    // No vault resolves from an empty $HOME with no .okf/ anywhere — the
+    // section should be present but null, not an error.
+    assert!(config_json["vault_config"].is_null());
+
+    // Existence flags only, never a raw secret value anywhere in the tree.
+    let rendered = serde_json::to_string(&config_json).unwrap();
+    assert!(!rendered.to_lowercase().contains("s3cr3t"));
+    for credential in config_json["credentials"].as_array().unwrap() {
+        assert!(credential.get("account").is_some());
+        assert!(credential.get("saved").is_some());
+        assert!(credential.get("value").is_none());
+    }
+}
+
+#[test]
+fn config_shows_vault_config_toml_when_a_vault_resolves() {
+    let home = tempfile::tempdir().unwrap();
+    let vault_dir = tempfile::tempdir().unwrap();
+    make_vault(vault_dir.path());
+    std::fs::write(
+        vault_dir.path().join(".okf/config.toml"),
+        "[compiler]\ndefault_model = \"anthropic/claude-3-5-sonnet\"\n",
+    )
+    .unwrap();
+
+    let config = okf_mcp(
+        &["--vault", vault_dir.path().to_str().unwrap(), "config"],
+        home.path(),
+    );
+    assert!(config.status.success(), "stderr: {}", stderr(&config));
+    let config_json: serde_json::Value = serde_json::from_str(&stdout(&config)).unwrap();
+
+    assert_eq!(config_json["vault_config"]["exists"], true);
+    assert_eq!(
+        config_json["vault_config"]["contents"]["compiler"]["default_model"],
+        "anthropic/claude-3-5-sonnet"
     );
 }
 

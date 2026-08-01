@@ -20,7 +20,23 @@ fn home_dir() -> PathBuf {
     resolve_home_dir()
 }
 
-fn read_yaml_if_exists(path: &Path) -> Map<String, Value> {
+/// The global config file path `load_config`'s cascade reads —
+/// `~/.okf-mcp/config.yml`. Exposed for `cli::config`'s layered display.
+pub fn global_config_path() -> PathBuf {
+    home_dir().join(CONFIG_DIR_NAME).join("config.yml")
+}
+
+/// The local config file path `load_config`'s cascade reads —
+/// `./okf-mcp.config.yml`. Exposed for `cli::config`'s layered display.
+pub fn local_config_path() -> PathBuf {
+    PathBuf::from(LOCAL_CONFIG_FILE)
+}
+
+/// Empty (not an error) when `path` doesn't exist or isn't a YAML object —
+/// `load_config`'s cascade already treats "file absent" as "this layer
+/// contributes nothing," and `cli::config`'s display wants the same
+/// leniency. Exposed for that display to read a layer's raw contents.
+pub fn read_yaml_if_exists(path: &Path) -> Map<String, Value> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Map::new();
     };
@@ -41,7 +57,11 @@ fn parse_env_value(config_key: &str, value: &str) -> Value {
     Value::String(value.to_string())
 }
 
-fn env_overrides() -> Map<String, Value> {
+/// Every `OKF_MCP_*` env var actually set in this process, keyed by the
+/// `Config` field it maps to. Exposed for `cli::config`'s layered display,
+/// which needs exactly this — "which env vars are actually set" — not
+/// just the fully-merged/defaulted result `load_config` returns.
+pub fn env_overrides() -> Map<String, Value> {
     let mut overrides = Map::new();
     for (config_key, env_suffix) in [
         ("url", "URL"),

@@ -316,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
             run_harness_server().await
         }
         Command::TestConnection => cli::test_connection::run().await,
-        Command::Config => cli::config::run(),
+        Command::Config => cli::config::run(vault),
         Command::Version => cli::version::run(),
     };
 
