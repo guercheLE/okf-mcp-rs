@@ -34,7 +34,12 @@ pub fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
             adapter_kind: AdapterKind::Anthropic,
             api_key_env: Some("ANTHROPIC_API_KEY"),
             base_url_env: None,
-            default_base_url: Some("https://api.anthropic.com"),
+            // Must include /v1 — genai's Anthropic adapter builds the
+            // request URL via simple concatenation (`{base_url}messages`),
+            // so a base URL missing the /v1 segment silently produces a
+            // 404 on a route that doesn't exist, with an empty body.
+            // Matches genai's own AnthropicAdapter::default_endpoint().
+            default_base_url: Some("https://api.anthropic.com/v1/"),
         },
         "openai" => ProviderSpec {
             adapter_kind: AdapterKind::OpenAI,
@@ -361,6 +366,17 @@ mod tests {
     fn ollama_default_base_url_ends_with_slash() {
         let spec = provider_spec("ollama").unwrap();
         assert_eq!(spec.default_base_url, Some("http://localhost:11434/"));
+    }
+
+    #[test]
+    fn anthropic_default_base_url_includes_the_v1_path_segment() {
+        // Regression test: genai's Anthropic adapter builds the request URL
+        // via `{base_url}messages` string concatenation — a base URL
+        // missing /v1 silently produces a 404 on a nonexistent route
+        // (https://api.anthropic.com/messages) instead of the real one
+        // (https://api.anthropic.com/v1/messages).
+        let spec = provider_spec("anthropic").unwrap();
+        assert_eq!(spec.default_base_url, Some("https://api.anthropic.com/v1/"));
     }
 
     #[test]
