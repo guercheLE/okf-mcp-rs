@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-01
+
+### Added
+- `okf-mcp models <provider>` (and MCP tool `okf-list-models`): lists a provider's available models directly, instead of only surfacing them as a side effect of an invalid `--model` error.
+
 ## [0.4.1] - 2026-08-01
 
 ### Fixed
@@ -66,6 +71,7 @@ A batch of fixes and small features from real-world usage feedback: vault lifecy
 ### Added
 - Initial commit.
 
+[0.5.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.0...v0.3.1
