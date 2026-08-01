@@ -100,8 +100,8 @@ pub fn load_config(cli_flags: Map<String, Value>) -> Result<Config, McpifyError>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config_schema::AuthMethod;
+    use super::*;
     use serde_json::json;
 
     fn base_flags() -> Map<String, Value> {
@@ -134,6 +134,11 @@ mod tests {
     /// cascade now loads successfully instead of erroring.
     #[test]
     fn an_entirely_empty_cascade_loads_successfully_with_defaults() {
+        // Serialized with `credential_storage`'s HOME-mutating tests —
+        // see that lock's doc comment for why this matters.
+        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         let prev_home = std::env::var_os("HOME");
         unsafe {

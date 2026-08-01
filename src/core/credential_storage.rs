@@ -163,6 +163,16 @@ pub fn delete_credential(account: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Guards every test (in this file and in `config_manager`'s) that mutates
+/// the process-global `HOME` env var. `encryption_key()` derives its key
+/// from `resolve_home_dir()`, so without this lock, `cargo test`'s default
+/// parallel execution can interleave two tests' `HOME` changes — e.g.
+/// another test restoring `HOME` in the gap between this file's
+/// save-then-load — and a save/load pair ends up using two different
+/// derived keys, breaking decryption non-deterministically.
+#[cfg(test)]
+pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,8 +194,12 @@ mod tests {
         // `save_credential`/`load_credential`, since the OS keychain (the
         // primary path) may or may not be available in the test
         // environment and this test should be deterministic either way.
+        let _guard = HOME_ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: test-only env mutation, single-threaded within this test.
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: test-only env mutation, serialized by HOME_ENV_TEST_LOCK
+        // across every test (in this file and config_manager's) that
+        // touches HOME.
         unsafe {
             std::env::set_var("HOME", dir.path());
         }
@@ -196,5 +210,13 @@ mod tests {
 
         delete_from_file("test-account").unwrap();
         assert_eq!(load_from_file("test-account").unwrap(), None);
+
+        // SAFETY: same guard as above.
+        unsafe {
+            match prev_home {
+                Some(prev) => std::env::set_var("HOME", prev),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 }
