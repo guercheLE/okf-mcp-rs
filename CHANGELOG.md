@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-08-01
+
+### Changed
+- README's Pipeline section now renders as a Mermaid diagram instead of an ASCII block that overflowed horizontally in GitHub's rendered view.
+- `docs/design-gaps.md` now spans the project's full release history (each entry carries its own "Fixed in" version instead of being grouped under one), and adds the `v0.2.1` Ollama base-URL gap.
+
 ## [0.3.0] - 2026-08-01
 
 A batch of fixes and small features from real-world usage feedback: vault lifecycle, compile resumability/commit-safety, provider auth, transport-aware output, and layered config/connection diagnostics. See [docs/plan-2026-08-fixes.md](docs/plan-2026-08-fixes.md) for the full investigation and design rationale, and [docs/design-gaps.md](docs/design-gaps.md) for what the original planning docs missed that let each of these ship in the first place.
@@ -45,6 +51,7 @@ A batch of fixes and small features from real-world usage feedback: vault lifecy
 ### Added
 - Initial commit.
 
+[0.3.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/guercheLE/okf-mcp-rs/compare/4d16659...v0.2.0
