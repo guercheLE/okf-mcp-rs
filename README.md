@@ -10,10 +10,13 @@ Ten fixed, well-defined tools — `okf-ingest`, `okf-compile`, `okf-rebuild`, `o
 
 ## Pipeline
 
-```
-[Web/File] --Firecrawl/local parse--> ./raw (immutable, hashed) --LLM compile--> ./wiki --lint/validate--> git commit
-                                                                                      |
-                                                                             okf-reindex / okf-search
+```mermaid
+flowchart LR
+    A["Web / File"] -->|"Firecrawl / local parse"| B["./raw
+    (immutable, hashed)"]
+    B -->|"LLM compile"| C["./wiki"]
+    C -->|"lint / validate"| D["git commit"]
+    C -.-> E["okf-reindex / okf-search"]
 ```
 
 - **`./raw/`** — append-only. Every ingested source is hashed (SHA-256) and tracked in a content-addressable manifest (`.okf/manifest.json`): re-ingesting unchanged content is a no-op, changed content supersedes the old version (never overwritten), and deletion is a soft tombstone by default (`--purge` for a hard delete).
