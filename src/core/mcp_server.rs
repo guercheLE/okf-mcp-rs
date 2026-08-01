@@ -65,6 +65,13 @@ pub struct CompileArgs {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub base_url_override: Option<String>,
+    /// Repair lint issues after compiling: mechanically (missing `.md`
+    /// extensions on `sources:` entries, `tid:`/`id:` frontmatter typos)
+    /// and, for broken links, via the LLM — synthesizing a concept page for
+    /// a missing link target, grounded only in the raw sources the
+    /// referencing pages already cite
+    #[serde(default)]
+    pub fix: Option<bool>,
     #[serde(default)]
     pub vault: Option<String>,
 }
@@ -80,6 +87,9 @@ pub struct RebuildArgs {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub base_url_override: Option<String>,
+    /// Same as `CompileArgs::fix` — see its description for details
+    #[serde(default)]
+    pub fix: Option<bool>,
     #[serde(default)]
     pub vault: Option<String>,
 }
@@ -98,6 +108,12 @@ pub struct LintArgs {
     /// Also fail on warnings (orphan pages), not just broken links/sources
     #[serde(default)]
     pub strict: Option<bool>,
+    /// Mechanically repair auto-fixable issues (missing `.md` extensions
+    /// on `sources:` entries, `tid:`/`id:` frontmatter typos) before
+    /// reporting. Never calls an LLM — see `okf-compile`/`okf-rebuild`'s
+    /// `fix` for LLM-assisted broken-link repair
+    #[serde(default)]
+    pub fix: Option<bool>,
     #[serde(default)]
     pub vault: Option<String>,
 }
@@ -242,10 +258,19 @@ impl OkfServer {
             };
             let diff_only = args.diff.unwrap_or(true);
             let output = Output::for_transport(transport);
-            let report =
+            let mut report =
                 compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
                     .await?;
-            compile_report_to_json(&report)
+            let (mechanical_fix, link_fix) = apply_fix_if_requested(
+                &vault_root,
+                &model_spec,
+                &options,
+                &output,
+                args.fix.unwrap_or(false),
+                &mut report,
+            )
+            .await?;
+            compile_report_to_json(&report, mechanical_fix.as_ref(), link_fix.as_ref())
         })
         .await
     }
@@ -269,10 +294,19 @@ impl OkfServer {
             };
             let diff_only = !args.force.unwrap_or(false);
             let output = Output::for_transport(transport);
-            let report =
+            let mut report =
                 compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
                     .await?;
-            compile_report_to_json(&report)
+            let (mechanical_fix, link_fix) = apply_fix_if_requested(
+                &vault_root,
+                &model_spec,
+                &options,
+                &output,
+                args.fix.unwrap_or(false),
+                &mut report,
+            )
+            .await?;
+            compile_report_to_json(&report, mechanical_fix.as_ref(), link_fix.as_ref())
         })
         .await
     }
@@ -313,7 +347,13 @@ impl OkfServer {
     ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-lint", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
-            let report = validator::lint_bundle(&vault_root)?;
+            let fix = args.fix.unwrap_or(false);
+            let (fix_report, report) = if fix {
+                let (fix_report, after_fix) = validator::fix_bundle(&vault_root)?;
+                (Some(fix_report), after_fix)
+            } else {
+                (None, validator::lint_bundle(&vault_root)?)
+            };
             let strict = args.strict.unwrap_or(false);
             let clean = !report.has_errors() && (!strict || report.orphan_pages.is_empty());
             let mut value = serde_json::to_value(&report)?;
@@ -323,6 +363,15 @@ impl OkfServer {
                     "summary".to_string(),
                     serde_json::json!(lint_report_format::to_text(&report)),
                 );
+                if let Some(fix_report) = &fix_report {
+                    object.insert(
+                        "fix".to_string(),
+                        serde_json::json!({
+                            "fixed_frontmatter_typos": fix_report.fixed_frontmatter_typos,
+                            "fixed_sources": fix_report.fixed_sources,
+                        }),
+                    );
+                }
             }
             Ok(value)
         })
@@ -455,8 +504,48 @@ impl OkfServer {
     }
 }
 
-fn compile_report_to_json(report: &compiler::CompileReport) -> anyhow::Result<serde_json::Value> {
-    Ok(serde_json::json!({
+/// `--fix`'s MCP-side counterpart to `cli::compile::report_and_commit`'s
+/// fix pass — same two tiers (mechanical, then LLM-assisted for any
+/// remaining broken links), folded into `report.lint_report` so the
+/// returned JSON reflects post-fix state. No git commit here: MCP
+/// `okf-compile`/`okf-rebuild` never commit (that's CLI-only), so there's
+/// no LLM-content-review gate to apply — the caller sees exactly what was
+/// written and decides what to do with it.
+async fn apply_fix_if_requested(
+    vault_root: &Path,
+    model_spec: &str,
+    options: &CompileOptions,
+    output: &Output,
+    fix: bool,
+    report: &mut compiler::CompileReport,
+) -> anyhow::Result<(
+    Option<validator::FixReport>,
+    Option<compiler::LinkFixReport>,
+)> {
+    if !fix {
+        return Ok((None, None));
+    }
+
+    let (mechanical, after_mechanical) = validator::fix_bundle(vault_root)?;
+    report.lint_report = after_mechanical;
+
+    let mut link_fix_report = None;
+    if !report.lint_report.broken_links.is_empty() {
+        let link_fix =
+            compiler::fix_broken_links(vault_root, model_spec, options, Some(output)).await?;
+        report.lint_report = validator::lint_bundle(vault_root)?;
+        link_fix_report = Some(link_fix);
+    }
+
+    Ok((Some(mechanical), link_fix_report))
+}
+
+fn compile_report_to_json(
+    report: &compiler::CompileReport,
+    mechanical_fix: Option<&validator::FixReport>,
+    link_fix: Option<&compiler::LinkFixReport>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::json!({
         "sources_processed": report.sources_processed(),
         "sources_failed": report.sources_failed(),
         "sources": report.sources.iter().map(|s| serde_json::json!({
@@ -471,7 +560,44 @@ fn compile_report_to_json(report: &compiler::CompileReport) -> anyhow::Result<se
             "missing_sources": report.lint_report.missing_sources.len(),
             "orphan_pages": report.lint_report.orphan_pages.len(),
         },
-    }))
+    });
+
+    if let Some(object) = value.as_object_mut() {
+        if let Some(mechanical) = mechanical_fix {
+            object.insert(
+                "fix".to_string(),
+                serde_json::json!({
+                    "fixed_frontmatter_typos": mechanical.fixed_frontmatter_typos,
+                    "fixed_sources": mechanical.fixed_sources,
+                }),
+            );
+        }
+        if let Some(link_fix) = link_fix {
+            let outcomes: Vec<serde_json::Value> = link_fix
+                .outcomes
+                .iter()
+                .map(|outcome| {
+                    let status = match &outcome.status {
+                        compiler::LinkFixStatus::Synthesized => "synthesized".to_string(),
+                        compiler::LinkFixStatus::SkippedNoSourceContext => {
+                            "skipped_no_source_context".to_string()
+                        }
+                        compiler::LinkFixStatus::Failed(err) => format!("failed: {err}"),
+                    };
+                    serde_json::json!({ "slug": outcome.slug, "status": status })
+                })
+                .collect();
+            object.insert(
+                "link_fix".to_string(),
+                serde_json::json!({
+                    "synthesized": link_fix.synthesized_slugs(),
+                    "outcomes": outcomes,
+                }),
+            );
+        }
+    }
+
+    Ok(value)
 }
 
 /// HTTP transport only: extracts this call's own per-request credentials
@@ -607,6 +733,7 @@ mod tests {
         let lint = server
             .lint(Parameters(LintArgs {
                 strict: None,
+                fix: None,
                 vault: Some(vault_path.clone()),
             }))
             .await

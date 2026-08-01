@@ -70,6 +70,18 @@ enum Command {
         /// Show which sources would be compiled, without calling the LLM
         #[arg(long)]
         diff: bool,
+        /// Repair lint issues after compiling: mechanically (missing `.md`
+        /// extensions on `sources:` entries) and, for broken links, via the
+        /// LLM — synthesizing a concept page for a missing link target,
+        /// grounded only in the raw sources the referencing pages already
+        /// cite. LLM-synthesized changes prompt for commit confirmation
+        /// unless --yes is also passed.
+        #[arg(long)]
+        fix: bool,
+        /// Skip the commit confirmation prompt for --fix's LLM-synthesized
+        /// changes and commit them automatically
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Recompile the wiki from all active raw sources
     Rebuild {
@@ -79,6 +91,12 @@ enum Command {
         /// Recompile every active source, not just unprocessed ones
         #[arg(long)]
         force: bool,
+        /// Same as `compile --fix` — see its help for details
+        #[arg(long)]
+        fix: bool,
+        /// Same as `compile --yes` — see its help for details
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// List a provider's available models (e.g. before picking `--model`)
     Models {
@@ -92,6 +110,10 @@ enum Command {
         strict: bool,
         #[arg(long)]
         json: bool,
+        /// Mechanically repair auto-fixable issues (currently: missing
+        /// `.md` extensions on `sources:` entries) before reporting
+        #[arg(long)]
+        fix: bool,
     },
     /// Rebuild the local text and vector index used by search
     Reindex {
@@ -125,6 +147,12 @@ enum Command {
         /// "<provider>/<model_name>" — see `compile --help` for model-size guidance
         #[arg(long)]
         model: Option<String>,
+        /// Same as `compile --fix` — see its help for details
+        #[arg(long)]
+        fix: bool,
+        /// Same as `compile --yes` — see its help for details
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
     /// Manage vaults / knowledge bases (~/.config/okf/vaults.toml) — alias:
     /// `kb`. `vault` and `kb` are the same commands under two names: `vault`
@@ -265,12 +293,20 @@ async fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         Command::Setup => cli::setup::run().await,
         Command::Ingest { source, tag } => cli::ingest::run(&source, &tag, vault).await,
-        Command::Compile { model, diff } => cli::compile::run(model.as_deref(), diff, vault).await,
-        Command::Rebuild { model, force } => {
-            cli::rebuild::run(model.as_deref(), force, vault).await
-        }
+        Command::Compile {
+            model,
+            diff,
+            fix,
+            yes,
+        } => cli::compile::run(model.as_deref(), diff, fix, yes, vault).await,
+        Command::Rebuild {
+            model,
+            force,
+            fix,
+            yes,
+        } => cli::rebuild::run(model.as_deref(), force, fix, yes, vault).await,
         Command::Models { provider } => cli::models::run(&provider, vault).await,
-        Command::Lint { strict, json } => cli::lint::run(strict, json, vault),
+        Command::Lint { strict, json, fix } => cli::lint::run(strict, json, fix, vault),
         Command::Reindex { embeddings } => cli::reindex::run(embeddings, vault),
         Command::Search {
             query,
@@ -279,9 +315,13 @@ async fn main() -> anyhow::Result<()> {
             all_vaults,
         } => cli::search::run(&query, limit, json, all_vaults, vault),
         Command::Delete { source, purge } => cli::delete::run(&source, purge, vault),
-        Command::Run { source, tag, model } => {
-            cli::run::run(&source, &tag, model.as_deref(), vault).await
-        }
+        Command::Run {
+            source,
+            tag,
+            model,
+            fix,
+            yes,
+        } => cli::run::run(&source, &tag, model.as_deref(), fix, yes, vault).await,
         Command::Vault(VaultCommand::List) => cli::vault::list(),
         Command::Vault(VaultCommand::Add {
             path,

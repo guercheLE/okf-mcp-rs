@@ -6,7 +6,13 @@ use okf_mcp::core::vault_resolver::resolve_vault;
 
 use super::compile::report_and_commit;
 
-pub async fn run(model: Option<&str>, force: bool, vault: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(
+    model: Option<&str>,
+    force: bool,
+    fix: bool,
+    yes: bool,
+    vault: Option<&str>,
+) -> anyhow::Result<()> {
     let vault_root = resolve_vault(vault)?;
     let model_spec = compiler::resolve_model_spec(&vault_root, model)?;
 
@@ -18,5 +24,14 @@ pub async fn run(model: Option<&str>, force: bool, vault: Option<&str>) -> anyho
     let options = compiler::vault_provider_options(&vault_root, &model_spec)?;
     let report =
         compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output)).await?;
-    report_and_commit(&vault_root, &report, "okf-mcp rebuild")
+    report_and_commit(
+        &vault_root,
+        &report,
+        "okf-mcp rebuild",
+        fix,
+        yes,
+        &model_spec,
+        &options,
+    )
+    .await
 }

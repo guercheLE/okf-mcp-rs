@@ -1,11 +1,20 @@
 // Standalone `okf-mcp compile` command.
 
+use std::io::IsTerminal;
+
 use okf_mcp::compiler;
 use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_resolver::resolve_vault;
 use okf_mcp::storage::{bundle, git};
+use okf_mcp::validator;
 
-pub async fn run(model: Option<&str>, diff: bool, vault: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(
+    model: Option<&str>,
+    diff: bool,
+    fix: bool,
+    yes: bool,
+    vault: Option<&str>,
+) -> anyhow::Result<()> {
     let vault_root = resolve_vault(vault)?;
     let model_spec = compiler::resolve_model_spec(&vault_root, model)?;
     let output = Output::cli();
@@ -21,27 +30,63 @@ pub async fn run(model: Option<&str>, diff: bool, vault: Option<&str>) -> anyhow
 
     let options = compiler::vault_provider_options(&vault_root, &model_spec)?;
     let report = compiler::compile(&vault_root, &model_spec, true, &options, Some(&output)).await?;
-    report_and_commit(&vault_root, &report, "okf-mcp compile")
+    report_and_commit(
+        &vault_root,
+        &report,
+        "okf-mcp compile",
+        fix,
+        yes,
+        &model_spec,
+        &options,
+    )
+    .await
 }
 
-/// Shared by `cli::rebuild` — same "print outcome, write the bundle, commit
-/// touched paths" tail for both commands.
+/// Prompts for confirmation before committing `--fix`'s LLM-synthesized
+/// changes, unless `assume_yes` (`--yes`) was passed. Mirrors
+/// `cli::setup_wizard`'s existing `spawn_blocking` + `inquire` pattern for
+/// running a blocking prompt from an async context. Never blocks waiting
+/// for input that can't come: a non-interactive session (no TTY on stdin —
+/// CI, a pipe, a background job) short-circuits to "don't commit" rather
+/// than hanging.
+async fn confirm_commit(message: String, assume_yes: bool) -> anyhow::Result<bool> {
+    if assume_yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    let confirmed = tokio::task::spawn_blocking(move || {
+        inquire::Confirm::new(&message).with_default(false).prompt()
+    })
+    .await??;
+    Ok(confirmed)
+}
+
+/// Shared by `cli::rebuild`/`cli::run` — same "print outcome, optionally
+/// auto-fix, write the bundle, commit touched paths" tail for all three
+/// commands.
 ///
-/// If any source failed or lint reports errors, this returns `Err` *before*
-/// writing `okf.json` or committing anything — a partial/broken run's
-/// inconsistent wiki state must never land in `okf.json` or git history.
-/// `./raw/` blobs and each source's own manifest ingest-history/
-/// `compiled_hash` entry are untouched either way: those are written
-/// during `ingest`/per-source in `compiler::compile`, entirely outside
-/// this function, and `manifest.json` is never part of the git-staged
-/// path list below — so a source that itself succeeded within an
-/// otherwise-failed run stays resumable on the next `compile` (see
-/// `select_sources`), it just doesn't get bundled/committed until a
+/// If any source failed or the (possibly post-fix) lint report has errors,
+/// this returns `Err` *before* writing `okf.json` or committing anything —
+/// a partial/broken run's inconsistent wiki state must never land in
+/// `okf.json` or git history. `./raw/` blobs and each source's own
+/// manifest ingest-history/`compiled_hash` entry are untouched either way:
+/// those are written during `ingest`/per-source in `compiler::compile`,
+/// entirely outside this function, and `manifest.json` is never part of
+/// the git-staged path list below — so a source that itself succeeded
+/// within an otherwise-failed run stays resumable on the next `compile`
+/// (see `select_sources`), it just doesn't get bundled/committed until a
 /// subsequent clean run.
-pub(crate) fn report_and_commit(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn report_and_commit(
     vault_root: &std::path::Path,
     report: &okf_mcp::compiler::CompileReport,
     commit_summary: &str,
+    fix: bool,
+    assume_yes: bool,
+    model_spec: &str,
+    options: &compiler::CompileOptions,
 ) -> anyhow::Result<()> {
     let output = Output::cli();
     output.line(&format!(
@@ -54,11 +99,42 @@ pub(crate) fn report_and_commit(
             output.line(&format!("  {} failed: {error}", source.uri));
         }
     }
-    if report.lint_report.has_errors() {
-        output.line(&okf_mcp::validator::report::to_text(&report.lint_report));
+
+    let mut lint_report = report.lint_report.clone();
+    let mut fixed_paths: Vec<String> = Vec::new();
+    let mut synthesized_slugs: Vec<String> = Vec::new();
+
+    if fix {
+        let (mechanical, after_mechanical) = validator::fix_bundle(vault_root)?;
+        if !mechanical.is_empty() {
+            output.line(&validator::fix::summary_line(&mechanical));
+            fixed_paths.extend(mechanical.fixed_sources.iter().map(|(p, _, _)| p.clone()));
+        }
+        lint_report = after_mechanical;
+
+        if !lint_report.broken_links.is_empty() {
+            let link_fix =
+                compiler::fix_broken_links(vault_root, model_spec, options, Some(&output)).await?;
+            output.line(&compiler::link_fix::summary_line(&link_fix));
+            synthesized_slugs = link_fix
+                .synthesized_slugs()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            fixed_paths.extend(link_fix.touched_paths.iter().filter_map(|path| {
+                path.strip_prefix(vault_root)
+                    .ok()
+                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            }));
+            lint_report = validator::lint_bundle(vault_root)?;
+        }
     }
 
-    if report.sources_failed() > 0 || report.lint_report.has_errors() {
+    if lint_report.has_errors() {
+        output.line(&okf_mcp::validator::report::to_text(&lint_report));
+    }
+
+    if report.sources_failed() > 0 || lint_report.has_errors() {
         output.line(&format!(
             "{} source(s) failed / lint found errors — not committing; fix and re-run compile.",
             report.sources_failed()
@@ -76,6 +152,7 @@ pub(crate) fn report_and_commit(
                 .map(|relative| relative.to_string_lossy().replace('\\', "/"))
         })
         .collect();
+    paths.extend(fixed_paths);
     paths.push("wiki/index.md".to_string());
     if let Ok(relative) = bundle_path.strip_prefix(vault_root) {
         paths.push(relative.to_string_lossy().replace('\\', "/"));
@@ -84,6 +161,25 @@ pub(crate) fn report_and_commit(
     paths.dedup();
 
     if git::is_git_repository(vault_root) {
+        if !synthesized_slugs.is_empty() {
+            let message = format!(
+                "--fix synthesized {} new concept page(s) via LLM: {}. Commit these changes now?",
+                synthesized_slugs.len(),
+                synthesized_slugs
+                    .iter()
+                    .map(|slug| format!("[[{slug}]]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if !confirm_commit(message, assume_yes).await? {
+                output.line(
+                    "Fix changes written but not committed — review and `git commit` \
+                     yourself, or re-run with --yes.",
+                );
+                return Ok(());
+            }
+        }
+
         let message = format!(
             "{commit_summary}: {} source(s) compiled",
             report.sources_processed()
@@ -103,7 +199,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use okf_mcp::compiler::CompileReport;
+    use okf_mcp::compiler::{CompileOptions, CompileReport};
 
     use super::*;
 
@@ -153,19 +249,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_failed_source_skips_the_bundle_and_the_commit() {
+    #[tokio::test]
+    async fn a_failed_source_skips_the_bundle_and_the_commit() {
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
 
-        let result = report_and_commit(vault.path(), &failing_report(), "okf-mcp compile");
+        let result = report_and_commit(
+            vault.path(),
+            &failing_report(),
+            "okf-mcp compile",
+            false,
+            false,
+            "anthropic/claude-3-5-sonnet",
+            &CompileOptions::default(),
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(!vault.path().join("okf.json").exists());
     }
 
-    #[test]
-    fn lint_errors_skip_the_bundle_and_the_commit_even_with_no_failed_sources() {
+    #[tokio::test]
+    async fn lint_errors_skip_the_bundle_and_the_commit_even_with_no_failed_sources() {
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
 
@@ -174,14 +279,23 @@ mod tests {
         report.lint_report.broken_links =
             vec![("wiki/concepts/a.md".to_string(), "missing".to_string())];
 
-        let result = report_and_commit(vault.path(), &report, "okf-mcp compile");
+        let result = report_and_commit(
+            vault.path(),
+            &report,
+            "okf-mcp compile",
+            false,
+            false,
+            "anthropic/claude-3-5-sonnet",
+            &CompileOptions::default(),
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(!vault.path().join("okf.json").exists());
     }
 
-    #[test]
-    fn a_clean_report_writes_the_bundle_and_commits() {
+    #[tokio::test]
+    async fn a_clean_report_writes_the_bundle_and_commits() {
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
         init_repo(vault.path());
@@ -190,10 +304,75 @@ mod tests {
         std::fs::create_dir_all(vault.path().join("wiki")).unwrap();
         std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
 
-        let result = report_and_commit(vault.path(), &clean_report(), "okf-mcp compile");
+        let result = report_and_commit(
+            vault.path(),
+            &clean_report(),
+            "okf-mcp compile",
+            false,
+            false,
+            "anthropic/claude-3-5-sonnet",
+            &CompileOptions::default(),
+        )
+        .await;
 
         assert!(result.is_ok(), "{result:?}");
         assert!(vault.path().join("okf.json").exists());
+        let log = run_git(vault.path(), &["log", "--oneline"]);
+        assert!(!String::from_utf8_lossy(&log.stdout).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fix_true_with_nothing_fixable_behaves_like_fix_false() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        init_repo(vault.path());
+        std::fs::create_dir_all(vault.path().join("wiki")).unwrap();
+        std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
+
+        let result = report_and_commit(
+            vault.path(),
+            &clean_report(),
+            "okf-mcp compile",
+            true,
+            false,
+            "anthropic/claude-3-5-sonnet",
+            &CompileOptions::default(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(vault.path().join("okf.json").exists());
+    }
+
+    #[tokio::test]
+    async fn fix_repairs_a_missing_dot_md_source_and_commits_it_without_a_prompt() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+        std::fs::write(vault.path().join("raw/raw_aaa.md"), "content").unwrap();
+        std::fs::create_dir_all(vault.path().join("wiki/concepts")).unwrap();
+        std::fs::write(
+            vault.path().join("wiki/concepts/a.md"),
+            "---\nokf_version: \"0.2\"\ntype: concept\nid: concept_a\ntitle: \"a\"\nsources:\n  - resource: \"/raw/raw_aaa\"\n---\n\n# a\n",
+        )
+        .unwrap();
+        std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
+        init_repo(vault.path());
+
+        let result = report_and_commit(
+            vault.path(),
+            &clean_report(),
+            "okf-mcp compile",
+            true,
+            false,
+            "anthropic/claude-3-5-sonnet",
+            &CompileOptions::default(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        let content = std::fs::read_to_string(vault.path().join("wiki/concepts/a.md")).unwrap();
+        assert!(content.contains("resource: \"/raw/raw_aaa.md\""));
         let log = run_git(vault.path(), &["log", "--oneline"]);
         assert!(!String::from_utf8_lossy(&log.stdout).trim().is_empty());
     }
