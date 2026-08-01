@@ -140,6 +140,7 @@ Keep the listener on localhost unless you've added appropriate network access co
 | `OLLAMA_HOST` | Overrides Ollama's default `http://localhost:11434` |
 | `CUSTOM_LLM_API_KEY` / `CUSTOM_LLM_BASE_URL` | For `custom/<model>` — any other OpenAI-compatible endpoint |
 | `OKF_MCP_LOG_LEVEL` | Log verbosity (`trace`/`debug`/`info`/`warn`/`error`) |
+| `FASTEMBED_CACHE_DIR` | Where the ~415 MiB local embedding model is cached (default `<home>/.okf-mcp/models`, absolute regardless of the invoking working directory) |
 
 See `.env.example` for the full list. `--model` always requires an explicit `<provider>/<model_name>` prefix (e.g. `anthropic/claude-3-5-sonnet`, `ollama/llama3.2`) — no "guess the provider" fallback, since that's ambiguous whenever more than one provider's key happens to be set. Falls back to a vault's `.okf/config.toml` `[compiler].default_model` when `--model` is omitted.
 
