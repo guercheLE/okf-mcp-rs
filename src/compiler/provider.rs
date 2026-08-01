@@ -15,12 +15,12 @@ use crate::core::credential_storage::load_credential;
 /// `test_connection`'s multi-provider probe and `cli::config`'s
 /// credential-presence listing, so both stay in sync with this module's
 /// actual routing table instead of re-declaring the list a third time.
-pub(crate) const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai", "groq", "ollama", "custom"];
+pub const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai", "groq", "ollama", "custom"];
 
-pub(crate) struct ProviderSpec {
-    pub(crate) adapter_kind: AdapterKind,
+pub struct ProviderSpec {
+    pub adapter_kind: AdapterKind,
     /// `None` for providers that need no key (Ollama, run locally).
-    pub(crate) api_key_env: Option<&'static str>,
+    pub api_key_env: Option<&'static str>,
     /// Env var name that, if set, overrides `default_base_url`.
     base_url_env: Option<&'static str>,
     /// `None` only for `custom`, which has no sensible default — it must
@@ -28,7 +28,7 @@ pub(crate) struct ProviderSpec {
     default_base_url: Option<&'static str>,
 }
 
-pub(crate) fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
+pub fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
     Ok(match provider {
         "anthropic" => ProviderSpec {
             adapter_kind: AdapterKind::Anthropic,
@@ -85,7 +85,7 @@ pub fn parse_model_spec(spec: &str) -> anyhow::Result<(&str, &str)> {
 /// env var (leftover shell export, inherited from an MCP host's spawn
 /// env, etc.) as "already configured" and silently skip the correctly
 /// saved credential.
-fn env_var_is_meaningfully_set(name: &str) -> bool {
+pub fn env_var_is_meaningfully_set(name: &str) -> bool {
     std::env::var(name)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
@@ -116,7 +116,7 @@ fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
 /// OS keychain/encrypted-file fallback `okf-mcp setup` writes to. Shared
 /// by `execute_compile_prompt` and `test_connection`'s per-provider probe
 /// so both resolve a provider's target identically.
-pub(crate) fn resolve_provider_target(
+pub fn resolve_provider_target(
     provider: &str,
     base_url_override: Option<&str>,
     api_key_env_override: Option<&str>,

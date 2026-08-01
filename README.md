@@ -79,7 +79,7 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 | `run` | `<URL\|FILE> [--tag] [--model]` | Ingest, compile, lint, and commit as one step |
 | `vault list` / `add` / `create` / `remove` (`rm`) / `delete` / `default` | — | Manage vaults / knowledge bases — also reachable as `kb ...` |
 | `setup` | — | Configure the Firecrawl API key and an LLM provider key |
-| `test-connection` | — | Verify the configured Firecrawl API key is reachable |
+| `test-connection` | — | Verify Firecrawl is reachable and report which LLM providers are configured |
 | `config` | — | Print the resolved configuration (secrets redacted) |
 | `version` | — | Print the installed version |
 | `start` / `http` | `[--host] [--port] [--cors-allow]` | Start the MCP server over stdio / HTTP |

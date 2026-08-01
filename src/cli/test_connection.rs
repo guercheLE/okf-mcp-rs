@@ -4,9 +4,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use okf_mcp::auth::auth_manager::AuthManager;
+use okf_mcp::compiler::provider as llm_provider;
 use okf_mcp::core::api_url_builder::build_api_url;
 use okf_mcp::core::config_manager::load_config;
 use okf_mcp::core::config_schema::Transport;
+use okf_mcp::core::credential_storage::load_credential;
+use okf_mcp::core::output::Output;
 
 async fn probe(
     config: &okf_mcp::core::config_schema::Config,
@@ -23,10 +26,93 @@ async fn probe(
 
     let response = request.send().await?;
     if response.status().is_success() {
-        println!("connection OK");
         Ok(())
     } else {
         anyhow::bail!("connection failed: HTTP {}", response.status())
+    }
+}
+
+struct ProviderStatus {
+    provider: &'static str,
+    configured: bool,
+    detail: String,
+}
+
+/// Checks whether `provider` has a resolvable credential. A provider with
+/// no `api_key_env` at all (only Ollama, today) needs no key — otherwise
+/// configured means its `api_key_env` var is meaningfully set (see
+/// `llm_provider::env_var_is_meaningfully_set`) or a credential is saved
+/// under `llm-<provider>` (what `okf-mcp setup` writes to).
+fn provider_is_configured(provider: &str, api_key_env: Option<&str>) -> bool {
+    match api_key_env {
+        None => true,
+        Some(env_name) => {
+            llm_provider::env_var_is_meaningfully_set(env_name)
+                || load_credential(&format!("llm-{provider}"))
+                    .ok()
+                    .flatten()
+                    .is_some()
+        }
+    }
+}
+
+/// Per `genai`'s own doc comment on `all_model_names`: only the Ollama
+/// adapter does a live network query against its host — the other four
+/// return a static, crate-baked-in list. So for those four, a successful
+/// call here only proves "a non-empty credential resolved," not that the
+/// key is actually valid against the real API; the `detail` string says
+/// so explicitly rather than implying a full auth check happened.
+async fn probe_llm_provider(client: &genai::Client, provider: &'static str) -> ProviderStatus {
+    let spec = match llm_provider::provider_spec(provider) {
+        Ok(spec) => spec,
+        Err(err) => {
+            return ProviderStatus {
+                provider,
+                configured: false,
+                detail: err.to_string(),
+            };
+        }
+    };
+
+    if !provider_is_configured(provider, spec.api_key_env) {
+        return ProviderStatus {
+            provider,
+            configured: false,
+            detail: "not configured".to_string(),
+        };
+    }
+
+    let Ok((adapter_kind, endpoint, auth)) =
+        llm_provider::resolve_provider_target(provider, None, None)
+    else {
+        return ProviderStatus {
+            provider,
+            configured: true,
+            detail: "could not resolve endpoint".to_string(),
+        };
+    };
+
+    match client.all_model_names(adapter_kind, (endpoint, auth)).await {
+        Ok(models) if provider == "ollama" => ProviderStatus {
+            provider,
+            configured: true,
+            detail: format!("reachable ({} models)", models.len()),
+        },
+        Ok(_) => ProviderStatus {
+            provider,
+            configured: true,
+            detail: "configured (static model list — not a live auth check)".to_string(),
+        },
+        Err(err) if provider == "ollama" => ProviderStatus {
+            provider,
+            configured: true,
+            detail: format!("unreachable: {err}"),
+        },
+        Err(err) => ProviderStatus {
+            provider,
+            configured: true,
+            detail: format!("error: {err}"),
+        },
     }
 }
 
@@ -43,7 +129,25 @@ pub async fn run() -> anyhow::Result<()> {
         )
         .await?;
 
-    probe(&config, headers).await
+    let output = Output::cli();
+    let firecrawl_result = probe(&config, headers).await;
+    match &firecrawl_result {
+        Ok(()) => output.line("firecrawl: connection OK"),
+        Err(err) => output.line(&format!("firecrawl: {err}")),
+    }
+
+    output.line("LLM providers:");
+    let client = genai::Client::default();
+    for provider in llm_provider::KNOWN_PROVIDERS {
+        let status = probe_llm_provider(&client, provider).await;
+        let marker = if status.configured { "configured" } else { "-" };
+        output.line(&format!(
+            "  {}: {marker} — {}",
+            status.provider, status.detail
+        ));
+    }
+
+    firecrawl_result
 }
 
 #[cfg(test)]
@@ -99,5 +203,43 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn ollama_is_always_configured_regardless_of_credentials() {
+        assert!(provider_is_configured("ollama", None));
+    }
+
+    #[test]
+    fn a_key_bearing_provider_with_no_env_var_or_credential_is_not_configured() {
+        // SAFETY: test-only env mutation; this var name is unique to this test.
+        unsafe {
+            std::env::remove_var("OKF_TEST_TC_UNCONFIGURED_KEY");
+        }
+        assert!(!provider_is_configured(
+            "groq-test-unconfigured",
+            Some("OKF_TEST_TC_UNCONFIGURED_KEY")
+        ));
+    }
+
+    #[test]
+    fn a_key_bearing_provider_with_a_meaningfully_set_env_var_is_configured() {
+        // SAFETY: test-only env mutation; this var name is unique to this test.
+        unsafe {
+            std::env::set_var("OKF_TEST_TC_CONFIGURED_KEY", "real-value");
+        }
+        assert!(provider_is_configured(
+            "groq-test-configured",
+            Some("OKF_TEST_TC_CONFIGURED_KEY")
+        ));
+        unsafe {
+            std::env::remove_var("OKF_TEST_TC_CONFIGURED_KEY");
+        }
+    }
+
+    #[test]
+    fn a_provider_with_no_api_key_env_at_all_is_configured() {
+        // e.g. a hypothetical no-auth OpenAI-compatible endpoint.
+        assert!(provider_is_configured("no-auth-provider", None));
     }
 }
