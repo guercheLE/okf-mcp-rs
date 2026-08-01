@@ -114,7 +114,12 @@ pub enum DeleteOutcome {
 /// Soft delete (`purge: false`) by default; `purge: true` additionally
 /// unlinks every raw blob `uri` ever had, per the design's GDPR/secrets
 /// hard-delete path.
-pub fn delete_source(vault_root: &Path, source: &str, purge: bool, reason: &str) -> anyhow::Result<DeleteOutcome> {
+pub fn delete_source(
+    vault_root: &Path,
+    source: &str,
+    purge: bool,
+    reason: &str,
+) -> anyhow::Result<DeleteOutcome> {
     let source_uri = if frontmatter::is_url(source) {
         source.to_string()
     } else {
@@ -130,7 +135,10 @@ pub fn delete_source(vault_root: &Path, source: &str, purge: bool, reason: &str)
             .ok_or_else(|| anyhow::anyhow!("no ingested source found for '{source_uri}'"))?;
         let mut removed_raw_ids = Vec::with_capacity(removed.history.len());
         for version in removed.history {
-            let _ = crate::storage::fs_ops::remove_file(vault_root, &format!("raw/{}.md", version.raw_id));
+            let _ = crate::storage::fs_ops::remove_file(
+                vault_root,
+                &format!("raw/{}.md", version.raw_id),
+            );
             removed_raw_ids.push(version.raw_id);
         }
         manifest::store::save(vault_root, &manifest)?;
@@ -258,7 +266,11 @@ mod tests {
 
         assert!(matches!(second.outcome, IngestOutcome::Superseded { .. }));
         let raw_path = second.raw_path.unwrap();
-        assert!(std::fs::read_to_string(&raw_path).unwrap().contains("version two"));
+        assert!(
+            std::fs::read_to_string(&raw_path)
+                .unwrap()
+                .contains("version two")
+        );
 
         // The superseded blob is still on disk — append-only.
         let raw_dir = vault.path().join("raw");
@@ -290,13 +302,26 @@ mod tests {
         let source = vault.path().join("source.md");
         std::fs::write(&source, "content").unwrap();
 
-        let report = process_ingest(source.to_str().unwrap(), None, vault.path(), &config(), &mut auth_manager(), None)
-            .await
-            .unwrap();
+        let report = process_ingest(
+            source.to_str().unwrap(),
+            None,
+            vault.path(),
+            &config(),
+            &mut auth_manager(),
+            None,
+        )
+        .await
+        .unwrap();
         let raw_path = report.raw_path.unwrap();
         assert!(raw_path.is_file());
 
-        let outcome = delete_source(vault.path(), source.to_str().unwrap(), false, "no longer needed").unwrap();
+        let outcome = delete_source(
+            vault.path(),
+            source.to_str().unwrap(),
+            false,
+            "no longer needed",
+        )
+        .unwrap();
         assert!(matches!(outcome, DeleteOutcome::Tombstoned));
         assert!(raw_path.is_file());
 
@@ -311,12 +336,20 @@ mod tests {
         let source = vault.path().join("source.md");
         std::fs::write(&source, "content").unwrap();
 
-        let report = process_ingest(source.to_str().unwrap(), None, vault.path(), &config(), &mut auth_manager(), None)
-            .await
-            .unwrap();
+        let report = process_ingest(
+            source.to_str().unwrap(),
+            None,
+            vault.path(),
+            &config(),
+            &mut auth_manager(),
+            None,
+        )
+        .await
+        .unwrap();
         let raw_path = report.raw_path.unwrap();
 
-        let outcome = delete_source(vault.path(), source.to_str().unwrap(), true, "gdpr request").unwrap();
+        let outcome =
+            delete_source(vault.path(), source.to_str().unwrap(), true, "gdpr request").unwrap();
         assert!(matches!(outcome, DeleteOutcome::Purged { .. }));
         assert!(!raw_path.exists());
 
@@ -328,7 +361,23 @@ mod tests {
     fn deleting_a_uri_that_was_never_ingested_is_an_error() {
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        assert!(delete_source(vault.path(), "https://example.com/never-ingested", false, "n/a").is_err());
-        assert!(delete_source(vault.path(), "https://example.com/never-ingested", true, "n/a").is_err());
+        assert!(
+            delete_source(
+                vault.path(),
+                "https://example.com/never-ingested",
+                false,
+                "n/a"
+            )
+            .is_err()
+        );
+        assert!(
+            delete_source(
+                vault.path(),
+                "https://example.com/never-ingested",
+                true,
+                "n/a"
+            )
+            .is_err()
+        );
     }
 }

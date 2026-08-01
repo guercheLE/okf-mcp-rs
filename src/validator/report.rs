@@ -19,7 +19,9 @@ pub fn to_text(report: &LintReport) -> String {
     if !report.broken_links.is_empty() {
         lines.push(format!("Broken links ({}):", report.broken_links.len()));
         for (source, target) in &report.broken_links {
-            lines.push(format!("  {source} -> [[{target}]] (target does not exist)"));
+            lines.push(format!(
+                "  {source} -> [[{target}]] (target does not exist)"
+            ));
         }
     }
 
@@ -34,7 +36,10 @@ pub fn to_text(report: &LintReport) -> String {
     }
 
     if !report.orphan_pages.is_empty() {
-        lines.push(format!("Orphan pages ({}, warning):", report.orphan_pages.len()));
+        lines.push(format!(
+            "Orphan pages ({}, warning):",
+            report.orphan_pages.len()
+        ));
         for page in &report.orphan_pages {
             lines.push(format!("  {page} is not linked from any other page"));
         }

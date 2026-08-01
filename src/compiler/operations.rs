@@ -48,7 +48,10 @@ pub fn parse_compile_payload(raw_response: &str) -> anyhow::Result<CompilePayloa
 /// Applies every operation in `payload`, in order, sandboxing each `path`
 /// against `vault_root` first. Writes are write-tmp-then-rename for
 /// crash-atomicity, matching `manifest::store::save`'s pattern.
-pub fn apply_operations(vault_root: &Path, payload: &CompilePayload) -> anyhow::Result<Vec<PathBuf>> {
+pub fn apply_operations(
+    vault_root: &Path,
+    payload: &CompilePayload,
+) -> anyhow::Result<Vec<PathBuf>> {
     let mut touched = Vec::with_capacity(payload.operations.len());
     for operation in &payload.operations {
         match operation {

@@ -12,8 +12,7 @@ pub async fn run(source: &str, tag: Option<&str>, vault: Option<&str>) -> anyhow
     let config = load_config(serde_json::Map::new())?;
     let mut auth_manager = AuthManager::new(config.auth_method);
 
-    let report =
-        process_ingest(source, tag, &vault_root, &config, &mut auth_manager, None).await?;
+    let report = process_ingest(source, tag, &vault_root, &config, &mut auth_manager, None).await?;
 
     match &report.outcome {
         IngestOutcome::NoOp => {

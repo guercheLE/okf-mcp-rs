@@ -168,7 +168,10 @@ impl LLMCompilerDriver {
             options = options.with_temperature(temperature as f64);
         }
 
-        let response = self.client.exec_chat(target, chat_req, Some(&options)).await?;
+        let response = self
+            .client
+            .exec_chat(target, chat_req, Some(&options))
+            .await?;
         response
             .first_text()
             .map(str::to_string)

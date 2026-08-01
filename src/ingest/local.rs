@@ -7,8 +7,7 @@
 use std::path::Path;
 
 use docx_rs::{
-    DocumentChild, ParagraphChild, RunChild, TableCellContent, TableChild, TableRowChild,
-    read_docx,
+    DocumentChild, ParagraphChild, RunChild, TableCellContent, TableChild, TableRowChild, read_docx,
 };
 
 pub fn parse_local_doc(path: &Path) -> anyhow::Result<String> {
@@ -131,12 +130,10 @@ mod tests {
 
         let docx = Docx::new()
             .add_paragraph(Paragraph::new().add_run(Run::new().add_text("Hello world")))
-            .add_table(Table::new(vec![
-                TableRow::new(vec![
-                    TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("A1"))),
-                    TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("B1"))),
-                ]),
-            ]));
+            .add_table(Table::new(vec![TableRow::new(vec![
+                TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("A1"))),
+                TableCell::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("B1"))),
+            ])]));
 
         let mut buffer = std::io::Cursor::new(Vec::new());
         docx.build().pack(&mut buffer).unwrap();

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, STORED, Schema, STRING, TEXT, Value};
+use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, doc};
 
 use crate::core::vault_resolver::sandbox_path;

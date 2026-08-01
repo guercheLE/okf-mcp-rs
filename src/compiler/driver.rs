@@ -118,7 +118,10 @@ fn superseded_raw_id(manifest: &Manifest, uri: &str) -> Option<String> {
     Some(history[history.len() - 2].raw_id.clone())
 }
 
-async fn related_wiki_pages(vault_root: &Path, raw_content: &str) -> anyhow::Result<Vec<WikiPageRef>> {
+async fn related_wiki_pages(
+    vault_root: &Path,
+    raw_content: &str,
+) -> anyhow::Result<Vec<WikiPageRef>> {
     // Capped: this is a search *query*, not the full document — a huge raw
     // page would otherwise dominate the query with irrelevant tail content.
     let query: String = raw_content.chars().take(500).collect();
@@ -149,7 +152,10 @@ async fn compile_one_source(
     let superseded = superseded_raw_id(manifest, uri).and_then(|prev_id| {
         read_raw_body(vault_root, &prev_id)
             .ok()
-            .map(|content| RawBlob { id: prev_id, content })
+            .map(|content| RawBlob {
+                id: prev_id,
+                content,
+            })
     });
 
     let related = related_wiki_pages(vault_root, &raw_content).await?;
@@ -229,7 +235,11 @@ pub async fn compile(
     let mut touched_paths = Vec::new();
 
     for (uri, raw_id) in sources {
-        match compile_one_source(vault_root, &driver, model_spec, options, &manifest, &uri, &raw_id).await {
+        match compile_one_source(
+            vault_root, &driver, model_spec, options, &manifest, &uri, &raw_id,
+        )
+        .await
+        {
             Ok(mut paths) => {
                 touched_paths.append(&mut paths);
                 outcomes.push(SourceOutcome {
@@ -351,7 +361,10 @@ mod tests {
         manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
         manifest.record_ingest("uri", "sha256:bbb", "raw_bbb", "t1");
 
-        assert_eq!(superseded_raw_id(&manifest, "uri").as_deref(), Some("raw_aaa"));
+        assert_eq!(
+            superseded_raw_id(&manifest, "uri").as_deref(),
+            Some("raw_aaa")
+        );
     }
 
     #[test]

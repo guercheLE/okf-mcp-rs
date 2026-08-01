@@ -8,7 +8,12 @@ use okf_mcp::ingest::process_ingest;
 
 use super::compile::report_and_commit;
 
-pub async fn run(source: &str, tag: Option<&str>, model: Option<&str>, vault: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(
+    source: &str,
+    tag: Option<&str>,
+    model: Option<&str>,
+    vault: Option<&str>,
+) -> anyhow::Result<()> {
     let vault_root = resolve_vault(vault)?;
     let config = load_config(serde_json::Map::new())?;
     let mut auth_manager = AuthManager::new(config.auth_method);

@@ -83,8 +83,8 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
             .to_string();
 
         let content = std::fs::read_to_string(&path)?;
-        let parsed = parse_wiki_page(&content)
-            .map_err(|err| anyhow::anyhow!("{relative_path}: {err}"))?;
+        let parsed =
+            parse_wiki_page(&content).map_err(|err| anyhow::anyhow!("{relative_path}: {err}"))?;
 
         existing_slugs.insert(slug.clone());
         pages.push(ParsedConceptPage {
@@ -114,10 +114,9 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
                     }
                 }
                 WikiLink::CrossVault { vault, concept } => {
-                    report.cross_vault_links.push((
-                        page.relative_path.clone(),
-                        format!("{vault}::{concept}"),
-                    ));
+                    report
+                        .cross_vault_links
+                        .push((page.relative_path.clone(), format!("{vault}::{concept}")));
                 }
             }
         }
@@ -239,7 +238,11 @@ mod tests {
                 "wiki/concepts/lonely.md".to_string(),
             ]
         );
-        assert!(!report.orphan_pages.contains(&"wiki/concepts/linked.md".to_string()));
+        assert!(
+            !report
+                .orphan_pages
+                .contains(&"wiki/concepts/linked.md".to_string())
+        );
         // Orphans are a warning, not a hard error.
         assert!(!report.has_errors());
     }

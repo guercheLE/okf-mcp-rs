@@ -101,7 +101,8 @@ mod tests {
         let config = config_for(format!("http://{address}"));
         let mut auth_manager = seeded_auth_manager();
 
-        let result = fetch_and_clean_url("https://example.com", &config, &mut auth_manager, None).await;
+        let result =
+            fetch_and_clean_url("https://example.com", &config, &mut auth_manager, None).await;
         assert!(result.is_err());
     }
 }

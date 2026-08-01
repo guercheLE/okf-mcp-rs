@@ -216,7 +216,10 @@ impl OkfServer {
         name = "okf-compile",
         description = "Compile newly-ingested raw sources into wiki concept pages."
     )]
-    async fn compile(&self, Parameters(args): Parameters<CompileArgs>) -> Result<CallToolResult, McpError> {
+    async fn compile(
+        &self,
+        Parameters(args): Parameters<CompileArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-compile", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
@@ -235,7 +238,10 @@ impl OkfServer {
         name = "okf-rebuild",
         description = "Recompile the wiki from all active raw sources."
     )]
-    async fn rebuild(&self, Parameters(args): Parameters<RebuildArgs>) -> Result<CallToolResult, McpError> {
+    async fn rebuild(
+        &self,
+        Parameters(args): Parameters<RebuildArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-rebuild", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
@@ -254,7 +260,10 @@ impl OkfServer {
         name = "okf-lint",
         description = "Check wikilinks, frontmatter, and source provenance in the wiki."
     )]
-    async fn lint(&self, Parameters(args): Parameters<LintArgs>) -> Result<CallToolResult, McpError> {
+    async fn lint(
+        &self,
+        Parameters(args): Parameters<LintArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-lint", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let report = validator::lint_bundle(&vault_root)?;
@@ -277,7 +286,10 @@ impl OkfServer {
         name = "okf-reindex",
         description = "Rebuild the local text and vector index used by search."
     )]
-    async fn reindex(&self, Parameters(args): Parameters<ReindexArgs>) -> Result<CallToolResult, McpError> {
+    async fn reindex(
+        &self,
+        Parameters(args): Parameters<ReindexArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-reindex", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let embeddings = args.embeddings.unwrap_or(false);
@@ -291,7 +303,10 @@ impl OkfServer {
         name = "okf-search",
         description = "Search ingested raw sources and compiled wiki concepts."
     )]
-    async fn search(&self, Parameters(args): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+    async fn search(
+        &self,
+        Parameters(args): Parameters<SearchArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-search", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let results = search::hybrid_search(&vault_root, &args.query, args.limit)?;
@@ -304,7 +319,10 @@ impl OkfServer {
         name = "okf-delete",
         description = "Remove a source from the vault (soft by default; purge hard-deletes)."
     )]
-    async fn delete(&self, Parameters(args): Parameters<DeleteArgs>) -> Result<CallToolResult, McpError> {
+    async fn delete(
+        &self,
+        Parameters(args): Parameters<DeleteArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-delete", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let purge = args.purge.unwrap_or(false);
@@ -325,7 +343,10 @@ impl OkfServer {
         name = "okf-read-index",
         description = "Read the wiki's table-of-contents page."
     )]
-    async fn read_index(&self, Parameters(args): Parameters<ReadIndexArgs>) -> Result<CallToolResult, McpError> {
+    async fn read_index(
+        &self,
+        Parameters(args): Parameters<ReadIndexArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-read-index", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let content = fs_ops::read_to_string(&vault_root, "wiki/index.md")
@@ -339,7 +360,10 @@ impl OkfServer {
         name = "okf-read-concept",
         description = "Read a single compiled wiki concept page."
     )]
-    async fn read_concept(&self, Parameters(args): Parameters<ReadConceptArgs>) -> Result<CallToolResult, McpError> {
+    async fn read_concept(
+        &self,
+        Parameters(args): Parameters<ReadConceptArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-read-concept", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let path = find_concept_path(&vault_root, &args.id_or_path)?;
@@ -358,7 +382,10 @@ impl OkfServer {
         name = "okf-list-vaults",
         description = "List every vault registered on this machine."
     )]
-    async fn list_vaults(&self, Parameters(_args): Parameters<ListVaultsArgs>) -> Result<CallToolResult, McpError> {
+    async fn list_vaults(
+        &self,
+        Parameters(_args): Parameters<ListVaultsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.run_tool("okf-list-vaults", async move {
             let registry = VaultRegistry::load()?;
             let vaults: Vec<serde_json::Value> = registry
@@ -490,7 +517,10 @@ mod tests {
             "auth_method": "pat"
         }))
         .unwrap();
-        OkfServer::new(config, Arc::new(Mutex::new(AuthManager::new(AuthMethod::Pat))))
+        OkfServer::new(
+            config,
+            Arc::new(Mutex::new(AuthManager::new(AuthMethod::Pat))),
+        )
     }
 
     #[test]
@@ -592,7 +622,9 @@ mod tests {
             mcp_protocol_exposes_the_full_hyphenated_tool_set_inner(),
         )
         .await
-        .expect("mcp protocol test timed out after 30s — the server task likely panicked mid-request");
+        .expect(
+            "mcp protocol test timed out after 30s — the server task likely panicked mid-request",
+        );
     }
 
     async fn mcp_protocol_exposes_the_full_hyphenated_tool_set_inner() {

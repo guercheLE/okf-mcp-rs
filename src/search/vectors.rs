@@ -109,7 +109,11 @@ pub fn chunk_by_heading(body: &str) -> Vec<(Option<String>, String)> {
 /// Whether `path`'s stored `content_hash` differs from `content_hash` (or
 /// the document isn't indexed yet at all) — the caller's cue to actually
 /// recompute embeddings rather than skip an unchanged document.
-pub fn needs_reembedding(conn: &Connection, path: &str, content_hash: &str) -> anyhow::Result<bool> {
+pub fn needs_reembedding(
+    conn: &Connection,
+    path: &str,
+    content_hash: &str,
+) -> anyhow::Result<bool> {
     let existing: Option<String> = conn
         .query_row(
             "SELECT content_hash FROM documents WHERE path = ?1",
@@ -181,7 +185,10 @@ pub fn remove_document(conn: &Connection, path: &str) -> anyhow::Result<()> {
 }
 
 fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding.iter().flat_map(|value| value.to_le_bytes()).collect()
+    embedding
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -333,20 +340,39 @@ mod tests {
             &conn,
             "a.md",
             &[
-                ("a.md#0".to_string(), None, "one".to_string(), synthetic_vector(0.1)),
-                ("a.md#1".to_string(), None, "two".to_string(), synthetic_vector(0.2)),
+                (
+                    "a.md#0".to_string(),
+                    None,
+                    "one".to_string(),
+                    synthetic_vector(0.1),
+                ),
+                (
+                    "a.md#1".to_string(),
+                    None,
+                    "two".to_string(),
+                    synthetic_vector(0.2),
+                ),
             ],
         )
         .unwrap();
         replace_sections(
             &conn,
             "a.md",
-            &[("a.md#0".to_string(), None, "only".to_string(), synthetic_vector(0.1))],
+            &[(
+                "a.md#0".to_string(),
+                None,
+                "only".to_string(),
+                synthetic_vector(0.1),
+            )],
         )
         .unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sections WHERE path = 'a.md'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sections WHERE path = 'a.md'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -360,14 +386,23 @@ mod tests {
         replace_sections(
             &conn,
             "a.md",
-            &[("a.md#0".to_string(), None, "snippet".to_string(), synthetic_vector(0.1))],
+            &[(
+                "a.md#0".to_string(),
+                None,
+                "snippet".to_string(),
+                synthetic_vector(0.1),
+            )],
         )
         .unwrap();
 
         remove_document(&conn, "a.md").unwrap();
 
-        let doc_count: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0)).unwrap();
-        let section_count: i64 = conn.query_row("SELECT COUNT(*) FROM sections", [], |row| row.get(0)).unwrap();
+        let doc_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .unwrap();
+        let section_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sections", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(doc_count, 0);
         assert_eq!(section_count, 0);
     }
@@ -386,7 +421,9 @@ mod tests {
         embed_and_store_sections(&conn, "a.md", "How do we handle API rate limits?").unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM document_vectors", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM document_vectors", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
 

@@ -5,7 +5,13 @@ use okf_mcp::core::vault_registry::VaultRegistry;
 use okf_mcp::core::vault_resolver::resolve_vault;
 use okf_mcp::search::{SearchResult, hybrid_search};
 
-pub fn run(query: &str, limit: usize, json: bool, all_vaults: bool, vault: Option<&str>) -> anyhow::Result<()> {
+pub fn run(
+    query: &str,
+    limit: usize,
+    json: bool,
+    all_vaults: bool,
+    vault: Option<&str>,
+) -> anyhow::Result<()> {
     if all_vaults {
         let results = search_all_vaults(query, limit)?;
         print_tagged_results(&results, json)
@@ -24,7 +30,11 @@ fn search_all_vaults(query: &str, limit: usize) -> anyhow::Result<Vec<(String, S
             tagged.extend(results.into_iter().map(|result| (name.clone(), result)));
         }
     }
-    tagged.sort_by(|(_, a), (_, b)| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    tagged.sort_by(|(_, a), (_, b)| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     tagged.truncate(limit);
     Ok(tagged)
 }
@@ -67,7 +77,10 @@ fn print_tagged_results(results: &[(String, SearchResult)], json: bool) -> anyho
         return Ok(());
     }
     for (vault, result) in results {
-        println!("{:.4}  [{vault}] {}  — {}", result.score, result.path, result.title);
+        println!(
+            "{:.4}  [{vault}] {}  — {}",
+            result.score, result.path, result.title
+        );
         if !result.snippet.is_empty() {
             println!("        {}", result.snippet);
         }

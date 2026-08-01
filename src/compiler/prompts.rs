@@ -173,6 +173,9 @@ mod tests {
     fn the_system_prompt_declares_the_json_only_output_contract() {
         assert!(COMPILER_SYSTEM_PROMPT.contains("CREATE_OR_UPDATE"));
         assert!(COMPILER_SYSTEM_PROMPT.contains("DELETE"));
-        assert!(COMPILER_SYSTEM_PROMPT.contains("[[concept-slug]]") || COMPILER_SYSTEM_PROMPT.contains("[[other-concept]]"));
+        assert!(
+            COMPILER_SYSTEM_PROMPT.contains("[[concept-slug]]")
+                || COMPILER_SYSTEM_PROMPT.contains("[[other-concept]]")
+        );
     }
 }

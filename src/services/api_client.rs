@@ -301,8 +301,11 @@ mod tests {
 
     #[tokio::test]
     async fn scrape_url_posts_to_the_firecrawl_scrape_endpoint_with_auth_and_the_target_url() {
-        let (base_url, request, server) =
-            mock_http("200 OK", r##"{"success":true,"data":{"markdown":"# Hello"}}"##).await;
+        let (base_url, request, server) = mock_http(
+            "200 OK",
+            r##"{"success":true,"data":{"markdown":"# Hello"}}"##,
+        )
+        .await;
         let api_client = firecrawl_client(base_url, 0);
         let mut auth_manager = seeded_auth_manager();
 

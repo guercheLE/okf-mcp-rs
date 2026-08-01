@@ -25,10 +25,10 @@ struct CollectedDocument {
 /// Shared with `compiler::driver`, which also needs "the body of a raw
 /// blob, frontmatter stripped" when building the compile prompt.
 pub(crate) fn raw_title_and_body(content: &str) -> (String, String) {
-    let body = match content
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.find("\n---\n").map(|end| &rest[end + "\n---\n".len()..]))
-    {
+    let body = match content.strip_prefix("---\n").and_then(|rest| {
+        rest.find("\n---\n")
+            .map(|end| &rest[end + "\n---\n".len()..])
+    }) {
         Some(body) => body.to_string(),
         None => content.to_string(),
     };
@@ -72,7 +72,11 @@ fn collect_documents(vault_root: &Path) -> anyhow::Result<Vec<CollectedDocument>
             let (title, body) = raw_title_and_body(&content);
             documents.push(CollectedDocument {
                 path: format!("raw/{stem}.md"),
-                title: if title.is_empty() { stem.to_string() } else { title },
+                title: if title.is_empty() {
+                    stem.to_string()
+                } else {
+                    title
+                },
                 body,
                 doc_type: "raw",
             });
@@ -179,7 +183,11 @@ pub struct SearchResult {
 /// Reciprocal Rank Fusion — deliberately not described to callers (CLI help
 /// text, MCP tool description) as "semantic search": these are fixed,
 /// well-defined tools, not a discovery layer over an unknown surface.
-pub fn hybrid_search(vault_root: &Path, query: &str, limit: usize) -> anyhow::Result<Vec<SearchResult>> {
+pub fn hybrid_search(
+    vault_root: &Path,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<SearchResult>> {
     let fetch_limit = (limit * 2).max(limit);
 
     let (tantivy_index, schema) = index::open_or_create(vault_root)?;
@@ -294,7 +302,12 @@ mod tests {
             "Resiliency Patterns",
             "Covers circuit breakers and rate limiting for API calls.",
         );
-        write_wiki_page(vault.path(), "colors", "Colors", "A page about paint colors.");
+        write_wiki_page(
+            vault.path(),
+            "colors",
+            "Colors",
+            "A page about paint colors.",
+        );
 
         reindex(vault.path(), false).unwrap();
 

@@ -125,7 +125,9 @@ mod tests {
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("---\n"));
-        assert!(contents.contains("okf_version: '1.0'") || contents.contains("okf_version: \"1.0\""));
+        assert!(
+            contents.contains("okf_version: '1.0'") || contents.contains("okf_version: \"1.0\"")
+        );
         assert!(contents.contains("source_url: https://example.com/docs"));
         assert!(contents.contains("tag: architecture"));
         assert!(contents.ends_with("# Hello\n\nBody text."));
@@ -147,6 +149,9 @@ mod tests {
         )
         .unwrap();
         let frontmatter_yaml = std::fs::read_to_string(&path).unwrap();
-        assert!(frontmatter_yaml.contains("source_url: null") || frontmatter_yaml.contains("source_url: ~"));
+        assert!(
+            frontmatter_yaml.contains("source_url: null")
+                || frontmatter_yaml.contains("source_url: ~")
+        );
     }
 }

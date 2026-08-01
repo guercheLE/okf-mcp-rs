@@ -45,7 +45,10 @@ fn ingest_update_and_soft_delete_survive_a_save_load_round_trip() {
     manifest::store::save(vault.path(), &final_state).unwrap();
 
     let after_delete = manifest::store::load(vault.path()).unwrap();
-    assert_eq!(after_delete.get_active_raw_id("https://example.com/spec"), None);
+    assert_eq!(
+        after_delete.get_active_raw_id("https://example.com/spec"),
+        None
+    );
     let history = &after_delete.sources["https://example.com/spec"].history;
     assert_eq!(history.len(), 2);
     assert!(matches!(history[1].status, SourceStatus::Tombstoned { .. }));

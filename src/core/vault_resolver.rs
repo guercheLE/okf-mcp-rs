@@ -57,7 +57,10 @@ fn resolve_vault_with(
 /// it needs canonicalizing.
 pub fn sandbox_path(vault_root: &Path, relative: &str) -> anyhow::Result<PathBuf> {
     let canonical_root = vault_root.canonicalize().map_err(|err| {
-        anyhow::anyhow!("vault root '{}' is not accessible: {err}", vault_root.display())
+        anyhow::anyhow!(
+            "vault root '{}' is not accessible: {err}",
+            vault_root.display()
+        )
     })?;
 
     let mut resolved = canonical_root.clone();
@@ -144,7 +147,10 @@ mod tests {
     fn sandbox_path_accepts_a_legitimate_relative_path() {
         let dir = tempfile::tempdir().unwrap();
         let resolved = sandbox_path(dir.path(), "raw/x.md").unwrap();
-        assert_eq!(resolved, dir.path().canonicalize().unwrap().join("raw/x.md"));
+        assert_eq!(
+            resolved,
+            dir.path().canonicalize().unwrap().join("raw/x.md")
+        );
     }
 
     #[test]

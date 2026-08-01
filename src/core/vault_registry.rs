@@ -133,7 +133,10 @@ mod tests {
                 description: None,
             },
         );
-        assert_eq!(registry.resolve("work"), PathBuf::from("/Users/dev/Vaults/Work"));
+        assert_eq!(
+            registry.resolve("work"),
+            PathBuf::from("/Users/dev/Vaults/Work")
+        );
         assert_eq!(
             registry.resolve("/some/literal/path"),
             PathBuf::from("/some/literal/path")

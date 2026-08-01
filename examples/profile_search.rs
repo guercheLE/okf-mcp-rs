@@ -65,7 +65,8 @@ fn fixture_vault() -> PathBuf {
         let content = format!(
             "---\nokf_version: \"0.2\"\ntype: concept\nid: concept_{slug}\ntitle: \"{title}\"\ndescription: \"{title}.\"\n---\n\n# {title}\n\n{body}\n"
         );
-        std::fs::write(dir.join(format!("wiki/concepts/{slug}.md")), content).expect("write fixture concept");
+        std::fs::write(dir.join(format!("wiki/concepts/{slug}.md")), content)
+            .expect("write fixture concept");
     }
     dir
 }

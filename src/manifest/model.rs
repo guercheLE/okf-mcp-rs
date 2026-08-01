@@ -17,7 +17,10 @@ pub enum SourceStatus {
     #[serde(rename = "SUPERSEDED")]
     Superseded { by_raw_id: String },
     #[serde(rename = "TOMBSTONED")]
-    Tombstoned { reason: String, tombstoned_at: String },
+    Tombstoned {
+        reason: String,
+        tombstoned_at: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,14 +171,18 @@ mod tests {
     #[test]
     fn first_ingest_of_a_uri_is_new_and_active() {
         let mut manifest = Manifest::default();
-        let outcome = manifest.record_ingest("https://example.com/a", "sha256:aaa", "raw_aaa", "t0");
+        let outcome =
+            manifest.record_ingest("https://example.com/a", "sha256:aaa", "raw_aaa", "t0");
         assert_eq!(
             outcome,
             IngestOutcome::New {
                 raw_id: "raw_aaa".to_string()
             }
         );
-        assert_eq!(manifest.get_active_raw_id("https://example.com/a"), Some("raw_aaa"));
+        assert_eq!(
+            manifest.get_active_raw_id("https://example.com/a"),
+            Some("raw_aaa")
+        );
     }
 
     #[test]

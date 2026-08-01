@@ -17,7 +17,8 @@ pub async fn run(model: Option<&str>, diff: bool, vault: Option<&str>) -> anyhow
         return Ok(());
     }
 
-    let report = compiler::compile(&vault_root, &model_spec, true, &CompileOptions::default()).await?;
+    let report =
+        compiler::compile(&vault_root, &model_spec, true, &CompileOptions::default()).await?;
     report_and_commit(&vault_root, &report, "okf-mcp compile")
 }
 

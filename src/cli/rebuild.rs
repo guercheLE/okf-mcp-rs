@@ -13,6 +13,12 @@ pub async fn run(model: Option<&str>, force: bool, vault: Option<&str>) -> anyho
     // Without it, `rebuild` behaves like `compile` (diff-only) — the same
     // underlying `compiler::compile` call, just under this command's name.
     let diff_only = !force;
-    let report = compiler::compile(&vault_root, &model_spec, diff_only, &CompileOptions::default()).await?;
+    let report = compiler::compile(
+        &vault_root,
+        &model_spec,
+        diff_only,
+        &CompileOptions::default(),
+    )
+    .await?;
     report_and_commit(&vault_root, &report, "okf-mcp rebuild")
 }

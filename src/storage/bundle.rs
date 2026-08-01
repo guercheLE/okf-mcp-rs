@@ -137,7 +137,10 @@ mod tests {
         assert_eq!(bundle.raw_sources.len(), 1);
         assert_eq!(bundle.raw_sources[0].raw_id, "raw_aaa");
         assert_eq!(bundle.concepts.len(), 1);
-        assert_eq!(bundle.concepts[0].sources, vec!["/raw/raw_aaa.md".to_string()]);
+        assert_eq!(
+            bundle.concepts[0].sources,
+            vec!["/raw/raw_aaa.md".to_string()]
+        );
     }
 
     #[test]

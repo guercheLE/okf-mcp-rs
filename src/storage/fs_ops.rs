@@ -48,7 +48,10 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         let path = write(vault.path(), "wiki/concepts/foo.md", "content").unwrap();
         assert!(path.is_file());
-        assert_eq!(read_to_string(vault.path(), "wiki/concepts/foo.md").unwrap(), "content");
+        assert_eq!(
+            read_to_string(vault.path(), "wiki/concepts/foo.md").unwrap(),
+            "content"
+        );
     }
 
     #[test]
