@@ -107,6 +107,50 @@ pub fn build_compile_user_prompt(
     prompt
 }
 
+/// Builds the user prompt for `--fix`'s LLM-assisted broken-link repair:
+/// unlike `build_compile_user_prompt` (driven by one new/changed raw
+/// source), this job starts from a *missing* concept slug that existing
+/// pages already link to, grounded only in the raw sources those
+/// referencing pages themselves cite — never invented from nothing.
+pub fn build_link_fix_user_prompt(
+    missing_slug: &str,
+    referencing_pages: &[WikiPageRef],
+    cited_raw_sources: &[RawBlob],
+) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str("## 1. MISSING CONCEPT TO SYNTHESIZE\n");
+    prompt.push_str(&format!(
+        "The wiki graph contains one or more `[[{missing_slug}]]` wikilinks, but \
+         `wiki/concepts/{missing_slug}.md` does not exist. Create exactly that file \
+         (and, only if genuinely warranted by the source material, closely related \
+         concept files it should link to) — do not invent unrelated concepts.\n\n"
+    ));
+
+    prompt.push_str("## 2. PAGES THAT LINK TO IT\n");
+    for page in referencing_pages {
+        prompt.push_str(&format!(
+            "Path: {}\n```markdown\n{}\n```\n\n",
+            page.path, page.content
+        ));
+    }
+
+    prompt.push_str("## 3. RAW SOURCES CITED BY THOSE PAGES\n");
+    for raw in cited_raw_sources {
+        prompt.push_str(&format!(
+            "Raw ID: {}\nContent:\n```markdown\n{}\n```\n\n",
+            raw.id, raw.content
+        ));
+    }
+
+    prompt.push_str(&format!(
+        "Synthesize wiki/concepts/{missing_slug}.md strictly from the raw sources above \
+         — the same provenance and atomicity rules as any other compile. Emit the JSON \
+         payload of operations."
+    ));
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +221,31 @@ mod tests {
             COMPILER_SYSTEM_PROMPT.contains("[[concept-slug]]")
                 || COMPILER_SYSTEM_PROMPT.contains("[[other-concept]]")
         );
+    }
+
+    #[test]
+    fn the_link_fix_prompt_names_the_missing_slug_and_its_expected_path() {
+        let prompt = build_link_fix_user_prompt("missing-concept", &[], &[]);
+        assert!(prompt.contains("[[missing-concept]]"));
+        assert!(prompt.contains("wiki/concepts/missing-concept.md"));
+    }
+
+    #[test]
+    fn the_link_fix_prompt_includes_referencing_pages_and_cited_raw_sources() {
+        let prompt = build_link_fix_user_prompt(
+            "missing-concept",
+            &[WikiPageRef {
+                path: "wiki/concepts/a.md".to_string(),
+                content: "See [[missing-concept]].".to_string(),
+            }],
+            &[RawBlob {
+                id: "raw_aaa".to_string(),
+                content: "source content".to_string(),
+            }],
+        );
+        assert!(prompt.contains("PAGES THAT LINK TO IT"));
+        assert!(prompt.contains("wiki/concepts/a.md"));
+        assert!(prompt.contains("RAW SOURCES CITED BY THOSE PAGES"));
+        assert!(prompt.contains("raw_aaa"));
     }
 }

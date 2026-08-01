@@ -155,7 +155,7 @@ fn select_sources(
         .collect())
 }
 
-fn read_raw_body(vault_root: &Path, raw_id: &str) -> anyhow::Result<String> {
+pub(crate) fn read_raw_body(vault_root: &Path, raw_id: &str) -> anyhow::Result<String> {
     let content = fs_ops::read_to_string(vault_root, &format!("raw/{raw_id}.md"))?;
     let (_, body) = crate::search::query::raw_title_and_body(&content);
     Ok(body)
