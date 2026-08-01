@@ -21,7 +21,7 @@ Ten fixed, well-defined tools — `okf-ingest`, `okf-compile`, `okf-rebuild`, `o
 - **`okf-mcp lint`** — checks for dangling links, missing provenance, and orphan pages before you commit.
 - **`okf-mcp reindex` / `okf-mcp search`** — a local Tantivy (BM25) + `sqlite-vec` (dense embeddings) index, merged via RRF; no external service.
 
-See [docs/okf-pipeline-design.md](docs/okf-pipeline-design.md) for the full design rationale and [docs/okf-mcp-implementation-plan.md](docs/okf-mcp-implementation-plan.md) for how it was built.
+See [docs/okf-pipeline-design.md](docs/okf-pipeline-design.md) for the full design rationale and [docs/okf-mcp-implementation-plan.md](docs/okf-mcp-implementation-plan.md) for how it was built. [CHANGELOG.md](CHANGELOG.md) tracks releases; [docs/design-gaps.md](docs/design-gaps.md) tracks what the planning docs missed along the way, for anyone wanting the retrospective lessons rather than just the diffs.
 
 ## Install
 
