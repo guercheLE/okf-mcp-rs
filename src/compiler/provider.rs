@@ -15,7 +15,20 @@ use crate::core::credential_storage::load_credential;
 /// `test_connection`'s multi-provider probe and `cli::config`'s
 /// credential-presence listing, so both stay in sync with this module's
 /// actual routing table instead of re-declaring the list a third time.
-pub const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai", "groq", "ollama", "custom"];
+pub const KNOWN_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "groq",
+    "gemini",
+    "openrouter",
+    "deepseek",
+    "xai",
+    "together",
+    "ollama-cloud",
+    "moonshot",
+    "ollama",
+    "custom",
+];
 
 pub struct ProviderSpec {
     pub adapter_kind: AdapterKind,
@@ -52,6 +65,54 @@ pub fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
             api_key_env: Some("GROQ_API_KEY"),
             base_url_env: None,
             default_base_url: Some("https://api.groq.com/openai/v1"),
+        },
+        "gemini" => ProviderSpec {
+            adapter_kind: AdapterKind::Gemini,
+            api_key_env: Some("GEMINI_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://generativelanguage.googleapis.com/v1beta/"),
+        },
+        // A gateway to many providers/models behind one key — model names
+        // are namespaced by their origin provider, e.g.
+        // "openrouter/anthropic/claude-sonnet-4-5".
+        "openrouter" => ProviderSpec {
+            adapter_kind: AdapterKind::OpenRouter,
+            api_key_env: Some("OPEN_ROUTER_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://openrouter.ai/api/v1/"),
+        },
+        "deepseek" => ProviderSpec {
+            adapter_kind: AdapterKind::DeepSeek,
+            api_key_env: Some("DEEPSEEK_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://api.deepseek.com/v1/"),
+        },
+        "xai" => ProviderSpec {
+            adapter_kind: AdapterKind::Xai,
+            api_key_env: Some("XAI_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://api.x.ai/v1/"),
+        },
+        "together" => ProviderSpec {
+            adapter_kind: AdapterKind::Together,
+            api_key_env: Some("TOGETHER_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://api.together.xyz/v1/"),
+        },
+        // The cloud-hosted sibling of "ollama" (run.ollama.com) — same
+        // Ollama protocol, remote instead of local, so it needs a key.
+        "ollama-cloud" => ProviderSpec {
+            adapter_kind: AdapterKind::OllamaCloud,
+            api_key_env: Some("OLLAMA_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://ollama.com/"),
+        },
+        // Moonshot AI — makers of the Kimi model family.
+        "moonshot" => ProviderSpec {
+            adapter_kind: AdapterKind::Moonshot,
+            api_key_env: Some("MOONSHOT_API_KEY"),
+            base_url_env: None,
+            default_base_url: Some("https://api.moonshot.cn/v1/"),
         },
         "ollama" => ProviderSpec {
             adapter_kind: AdapterKind::Ollama,
@@ -377,6 +438,55 @@ mod tests {
         // (https://api.anthropic.com/v1/messages).
         let spec = provider_spec("anthropic").unwrap();
         assert_eq!(spec.default_base_url, Some("https://api.anthropic.com/v1/"));
+    }
+
+    #[test]
+    fn new_providers_default_base_urls_match_genais_own_adapter_defaults() {
+        // Each pinned against genai 0.6.5's own AdapterImpl::default_endpoint()
+        // for that adapter, the same class of check that caught item 3's
+        // Anthropic /v1 bug — a value that diverges from genai's own
+        // default should be a deliberate, documented choice, not a typo.
+        let cases = [
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta/",
+            ),
+            ("openrouter", "https://openrouter.ai/api/v1/"),
+            ("deepseek", "https://api.deepseek.com/v1/"),
+            ("xai", "https://api.x.ai/v1/"),
+            ("together", "https://api.together.xyz/v1/"),
+            ("ollama-cloud", "https://ollama.com/"),
+            ("moonshot", "https://api.moonshot.cn/v1/"),
+        ];
+        for (provider, expected_url) in cases {
+            let spec = provider_spec(provider).unwrap();
+            assert_eq!(
+                spec.default_base_url,
+                Some(expected_url),
+                "{provider}'s default_base_url"
+            );
+        }
+    }
+
+    #[test]
+    fn new_providers_use_their_documented_api_key_env_var() {
+        let cases = [
+            ("gemini", "GEMINI_API_KEY"),
+            ("openrouter", "OPEN_ROUTER_API_KEY"),
+            ("deepseek", "DEEPSEEK_API_KEY"),
+            ("xai", "XAI_API_KEY"),
+            ("together", "TOGETHER_API_KEY"),
+            ("ollama-cloud", "OLLAMA_API_KEY"),
+            ("moonshot", "MOONSHOT_API_KEY"),
+        ];
+        for (provider, expected_env) in cases {
+            let spec = provider_spec(provider).unwrap();
+            assert_eq!(
+                spec.api_key_env,
+                Some(expected_env),
+                "{provider}'s api_key_env"
+            );
+        }
     }
 
     #[test]

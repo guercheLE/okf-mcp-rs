@@ -144,9 +144,9 @@ Keep the listener on localhost unless you've added appropriate network access co
 | --- | --- |
 | `OKF_MCP_FIRECRAWL_BASE_URL` | Firecrawl API base URL (default `https://api.firecrawl.dev`) |
 | `OKF_MCP_TOKEN` / `OKF_MCP_API_KEY` | Firecrawl API key — checked before the OS keychain/encrypted-file fallback `okf-mcp setup` writes to |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GROQ_API_KEY` | LLM provider keys, read by whichever `<provider>/<model>` you pass to `--model` |
-| `OLLAMA_HOST` | Overrides Ollama's default `http://localhost:11434` |
-| `CUSTOM_LLM_API_KEY` / `CUSTOM_LLM_BASE_URL` | For `custom/<model>` — any other OpenAI-compatible endpoint |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GROQ_API_KEY` / `GEMINI_API_KEY` / `OPEN_ROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `XAI_API_KEY` / `TOGETHER_API_KEY` / `OLLAMA_API_KEY` / `MOONSHOT_API_KEY` | LLM provider keys, read by whichever `<provider>/<model>` you pass to `--model` (`anthropic`, `openai`, `groq`, `gemini`, `openrouter`, `deepseek`, `xai`, `together`, `ollama-cloud`, `moonshot` respectively) |
+| `OLLAMA_HOST` | Overrides local Ollama's default `http://localhost:11434` (`ollama/<model>` — no key needed; distinct from `ollama-cloud/<model>`, which does) |
+| `CUSTOM_LLM_API_KEY` / `CUSTOM_LLM_BASE_URL` | For `custom/<model>` — any other OpenAI-compatible endpoint not listed above |
 | `OKF_MCP_LOG_LEVEL` | Log verbosity (`trace`/`debug`/`info`/`warn`/`error`) |
 | `FASTEMBED_CACHE_DIR` | Where the ~415 MiB local embedding model is cached (default `<home>/.okf-mcp/models`, absolute regardless of the invoking working directory) |
 

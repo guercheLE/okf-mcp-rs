@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use okf_mcp::compiler::provider::KNOWN_PROVIDERS;
 use okf_mcp::core::config_schema::{AuthMethod, Transport};
 use okf_mcp::core::credential_storage::save_credential;
 
@@ -66,7 +67,7 @@ async fn prompt_llm_provider() -> anyhow::Result<Option<(String, Option<String>)
         return Ok(None);
     }
 
-    let providers = vec!["anthropic", "openai", "groq", "ollama", "custom"];
+    let providers = KNOWN_PROVIDERS.to_vec();
     let provider = tokio::task::spawn_blocking(move || {
         inquire::Select::new("LLM provider:", providers).prompt()
     })
