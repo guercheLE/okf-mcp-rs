@@ -20,7 +20,9 @@ pub fn list() -> anyhow::Result<()> {
             ""
         };
         match &entry.description {
-            Some(description) => println!("{name}{marker}: {} — {description}", entry.path.display()),
+            Some(description) => {
+                println!("{name}{marker}: {} — {description}", entry.path.display())
+            }
             None => println!("{name}{marker}: {}", entry.path.display()),
         }
     }
@@ -38,6 +40,19 @@ pub fn add(path: &str, name: &str, description: Option<&str>) -> anyhow::Result<
     );
     registry.save()?;
     println!("Registered vault '{name}' -> {path}");
+    Ok(())
+}
+
+pub fn remove(name: &str) -> anyhow::Result<()> {
+    let mut registry = VaultRegistry::load()?;
+    if registry.vaults.remove(name).is_none() {
+        anyhow::bail!("no vault named '{name}' is registered");
+    }
+    if registry.default.as_deref() == Some(name) {
+        registry.default = None;
+    }
+    registry.save()?;
+    println!("Removed vault '{name}' from registry.");
     Ok(())
 }
 

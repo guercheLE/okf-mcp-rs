@@ -45,7 +45,10 @@ fn version_help_and_config_are_available() {
         "ingest", "compile", "rebuild", "lint", "reindex", "search", "delete", "run", "vault",
         "start", "http",
     ] {
-        assert!(help_text.contains(command), "--help should mention '{command}'");
+        assert!(
+            help_text.contains(command),
+            "--help should mention '{command}'"
+        );
     }
     // The old generic-catalog commands must be gone.
     assert!(!help_text.contains("versions"));
@@ -53,7 +56,10 @@ fn version_help_and_config_are_available() {
     let config = okf_mcp(&["config"], home.path());
     assert!(config.status.success());
     let config_json: serde_json::Value = serde_json::from_str(&stdout(&config)).unwrap();
-    assert_eq!(config_json["firecrawl_base_url"], "https://api.firecrawl.dev");
+    assert_eq!(
+        config_json["firecrawl_base_url"],
+        "https://api.firecrawl.dev"
+    );
 }
 
 #[test]
@@ -88,6 +94,15 @@ fn vault_add_list_and_default_round_trip() {
 
     let unknown_default = okf_mcp(&["vault", "default", "does-not-exist"], home.path());
     assert!(!unknown_default.status.success());
+
+    let remove = okf_mcp(&["vault", "remove", "test-vault"], home.path());
+    assert!(remove.status.success(), "stderr: {}", stderr(&remove));
+
+    let list_after_remove = okf_mcp(&["vault", "list"], home.path());
+    assert!(!stdout(&list_after_remove).contains("test-vault"));
+
+    let remove_unknown = okf_mcp(&["vault", "rm", "does-not-exist"], home.path());
+    assert!(!remove_unknown.status.success());
 }
 
 #[test]
@@ -98,10 +113,21 @@ fn ingest_lint_reindex_search_and_delete_round_trip_a_local_file() {
     let vault_arg = vault_dir.path().to_str().unwrap();
 
     let source = vault_dir.path().join("source.md");
-    std::fs::write(&source, "# Rate Limits\n\nHow do we handle API rate limits and retries?").unwrap();
+    std::fs::write(
+        &source,
+        "# Rate Limits\n\nHow do we handle API rate limits and retries?",
+    )
+    .unwrap();
 
     let ingest = okf_mcp(
-        &["--vault", vault_arg, "ingest", source.to_str().unwrap(), "--tag", "smoke"],
+        &[
+            "--vault",
+            vault_arg,
+            "ingest",
+            source.to_str().unwrap(),
+            "--tag",
+            "smoke",
+        ],
         home.path(),
     );
     assert!(ingest.status.success(), "stderr: {}", stderr(&ingest));
@@ -123,7 +149,10 @@ fn ingest_lint_reindex_search_and_delete_round_trip_a_local_file() {
     assert!(reindex.status.success(), "stderr: {}", stderr(&reindex));
     assert!(stdout(&reindex).contains("Indexed"));
 
-    let search = okf_mcp(&["--vault", vault_arg, "search", "rate limits"], home.path());
+    let search = okf_mcp(
+        &["--vault", vault_arg, "search", "rate limits"],
+        home.path(),
+    );
     assert!(search.status.success(), "stderr: {}", stderr(&search));
     // Raw blobs are stored under a content-hashed name, not the original
     // filename — assert on the extracted title (from the source's `# `
@@ -179,12 +208,20 @@ fn lint_on_a_broken_wiki_reports_errors_and_exits_nonzero() {
     )
     .unwrap();
 
-    let lint = okf_mcp(&["--vault", vault_dir.path().to_str().unwrap(), "lint"], home.path());
+    let lint = okf_mcp(
+        &["--vault", vault_dir.path().to_str().unwrap(), "lint"],
+        home.path(),
+    );
     assert!(!lint.status.success());
     assert!(stdout(&lint).contains("Broken links") || stdout(&lint).contains("FAILED"));
 
     let lint_json = okf_mcp(
-        &["--vault", vault_dir.path().to_str().unwrap(), "lint", "--json"],
+        &[
+            "--vault",
+            vault_dir.path().to_str().unwrap(),
+            "lint",
+            "--json",
+        ],
         home.path(),
     );
     let report: serde_json::Value = serde_json::from_str(&stdout(&lint_json)).unwrap();
@@ -214,7 +251,10 @@ fn compile_diff_dry_run_lists_active_sources_without_calling_an_llm() {
     let source = vault_dir.path().join("source.md");
     std::fs::write(&source, "content").unwrap();
 
-    okf_mcp(&["--vault", vault_arg, "ingest", source.to_str().unwrap()], home.path());
+    okf_mcp(
+        &["--vault", vault_arg, "ingest", source.to_str().unwrap()],
+        home.path(),
+    );
 
     let dry_run = okf_mcp(
         &[

@@ -31,7 +31,11 @@ use okf_mcp::http::server::start_http_server;
 use okf_mcp::http::types::HttpServerConfig;
 
 #[derive(Parser)]
-#[command(name = "okf-mcp", about = "OKF (Open Knowledge Format) pipeline", version)]
+#[command(
+    name = "okf-mcp",
+    about = "OKF (Open Knowledge Format) pipeline",
+    version
+)]
 struct Cli {
     /// Vault name (from the registry) or path — overrides the CWD `.okf/`
     /// walk-up and the registry default. Global: works on every subcommand.
@@ -141,6 +145,9 @@ enum VaultCommand {
         #[arg(long)]
         description: Option<String>,
     },
+    /// Remove a vault from the registry (~/.config/okf/vaults.toml)
+    #[command(alias = "rm")]
+    Remove { name: String },
     /// Set the default vault
     Default { name: String },
 }
@@ -228,7 +235,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Setup => cli::setup::run().await,
         Command::Ingest { source, tag } => cli::ingest::run(&source, tag.as_deref(), vault).await,
         Command::Compile { model, diff } => cli::compile::run(model.as_deref(), diff, vault).await,
-        Command::Rebuild { model, force } => cli::rebuild::run(model.as_deref(), force, vault).await,
+        Command::Rebuild { model, force } => {
+            cli::rebuild::run(model.as_deref(), force, vault).await
+        }
         Command::Lint { strict, json } => cli::lint::run(strict, json, vault),
         Command::Reindex { embeddings } => cli::reindex::run(embeddings, vault),
         Command::Search {
@@ -247,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
             name,
             description,
         }) => cli::vault::add(&path, &name, description.as_deref()),
+        Command::Vault(VaultCommand::Remove { name }) => cli::vault::remove(&name),
         Command::Vault(VaultCommand::Default { name }) => cli::vault::default(&name),
         Command::Start => {
             // SAFETY: single-threaded at this point, before `#[tokio::main]`
