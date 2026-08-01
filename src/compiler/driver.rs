@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::core::output::{Output, ProgressEvent};
 use crate::core::vault_config::load_vault_config;
 use crate::manifest::{self, Manifest};
 use crate::search::hybrid_search;
@@ -233,15 +234,28 @@ pub async fn compile(
     model_spec: &str,
     diff_only: bool,
     options: &CompileOptions,
+    on_progress: Option<&Output>,
 ) -> anyhow::Result<CompileReport> {
     let mut manifest = manifest::store::load(vault_root)?;
     let sources = select_sources(vault_root, &manifest, diff_only)?;
 
     let driver = LLMCompilerDriver::new();
-    let mut outcomes = Vec::with_capacity(sources.len());
+    let total = sources.len();
+    let mut outcomes = Vec::with_capacity(total);
     let mut touched_paths = Vec::new();
 
-    for (uri, raw_id) in sources {
+    for (index, (uri, raw_id)) in sources.into_iter().enumerate() {
+        let position = index + 1;
+        if let Some(output) = on_progress {
+            output.line(
+                &ProgressEvent::Started {
+                    index: position,
+                    total,
+                    label: format!("compiling {uri}"),
+                }
+                .to_string(),
+            );
+        }
         match compile_one_source(
             vault_root, &driver, model_spec, options, &manifest, &uri, &raw_id,
         )
@@ -259,6 +273,17 @@ pub async fn compile(
                 // later gets treated as failed.
                 manifest.mark_compiled(&uri);
                 manifest::store::save(vault_root, &manifest)?;
+                if let Some(output) = on_progress {
+                    output.line(
+                        &ProgressEvent::Finished {
+                            index: position,
+                            total,
+                            label: format!("compiling {uri}"),
+                            error: None,
+                        }
+                        .to_string(),
+                    );
+                }
                 outcomes.push(SourceOutcome {
                     uri,
                     raw_id,
@@ -266,6 +291,17 @@ pub async fn compile(
                 });
             }
             Err(err) => {
+                if let Some(output) = on_progress {
+                    output.line(
+                        &ProgressEvent::Finished {
+                            index: position,
+                            total,
+                            label: format!("compiling {uri}"),
+                            error: Some(err.to_string()),
+                        }
+                        .to_string(),
+                    );
+                }
                 outcomes.push(SourceOutcome {
                     uri,
                     raw_id,

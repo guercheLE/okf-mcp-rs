@@ -82,7 +82,7 @@ fn main() {
         .unwrap_or_else(|_| "how do we handle API rate limits".to_string());
 
     let vault_root = fixture_vault();
-    reindex(&vault_root, true).expect("fixture reindex failed");
+    reindex(&vault_root, true, None).expect("fixture reindex failed");
 
     // Warm the embedding model once before any measured work, in both
     // modes — loading it mid-measurement would otherwise dominate whatever

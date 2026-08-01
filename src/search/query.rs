@@ -6,6 +6,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::core::output::{Output, ProgressEvent};
 use crate::ingest::frontmatter::hash_content;
 use crate::manifest;
 use crate::services::embedding_service::embed;
@@ -118,7 +119,11 @@ pub struct ReindexReport {
 /// in full); embeddings are only (re)computed for documents whose content
 /// hash changed since the last `--embeddings` reindex, unless `embeddings`
 /// itself is false, in which case the vector half isn't touched at all.
-pub fn reindex(vault_root: &Path, embeddings: bool) -> anyhow::Result<ReindexReport> {
+pub fn reindex(
+    vault_root: &Path,
+    embeddings: bool,
+    on_progress: Option<&Output>,
+) -> anyhow::Result<ReindexReport> {
     let documents = collect_documents(vault_root)?;
 
     let (tantivy_index, schema) = index::open_or_create(vault_root)?;
@@ -140,7 +145,20 @@ pub fn reindex(vault_root: &Path, embeddings: bool) -> anyhow::Result<ReindexRep
 
     if embeddings {
         let conn = vectors::open_or_create(vault_root)?;
-        for document in &documents {
+        let total = documents.len();
+        for (index, document) in documents.iter().enumerate() {
+            let position = index + 1;
+            if let Some(output) = on_progress {
+                output.line(
+                    &ProgressEvent::Started {
+                        index: position,
+                        total,
+                        label: format!("indexing {}", document.path),
+                    }
+                    .to_string(),
+                );
+            }
+
             let content_hash = hash_content(&document.body);
             // Must check *before* upserting metadata below — that upsert
             // overwrites the stored hash with `content_hash`, so checking
@@ -163,6 +181,18 @@ pub fn reindex(vault_root: &Path, embeddings: bool) -> anyhow::Result<ReindexRep
                 report.vectors_embedded += 1;
             } else {
                 report.vectors_skipped_unchanged += 1;
+            }
+
+            if let Some(output) = on_progress {
+                output.line(
+                    &ProgressEvent::Finished {
+                        index: position,
+                        total,
+                        label: format!("indexing {}", document.path),
+                        error: None,
+                    }
+                    .to_string(),
+                );
             }
         }
     }
@@ -271,7 +301,7 @@ mod tests {
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
         write_wiki_page(vault.path(), "a", "Alpha", "Content about alpha.");
 
-        let report = reindex(vault.path(), false).unwrap();
+        let report = reindex(vault.path(), false, None).unwrap();
         assert_eq!(report.text_documents_indexed, 1);
         assert_eq!(report.vectors_embedded, 0);
         assert!(!vault.path().join(".okf/index.db/vectors.sqlite").exists());
@@ -283,11 +313,11 @@ mod tests {
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
         write_wiki_page(vault.path(), "a", "Alpha", "Content about alpha.");
 
-        let first = reindex(vault.path(), true).unwrap();
+        let first = reindex(vault.path(), true, None).unwrap();
         assert_eq!(first.vectors_embedded, 1);
         assert_eq!(first.vectors_skipped_unchanged, 0);
 
-        let second = reindex(vault.path(), true).unwrap();
+        let second = reindex(vault.path(), true, None).unwrap();
         assert_eq!(second.vectors_embedded, 0);
         assert_eq!(second.vectors_skipped_unchanged, 1);
     }
@@ -309,7 +339,7 @@ mod tests {
             "A page about paint colors.",
         );
 
-        reindex(vault.path(), false).unwrap();
+        reindex(vault.path(), false, None).unwrap();
 
         let results = hybrid_search(vault.path(), "rate limiting", 5).unwrap();
         assert!(!results.is_empty());
@@ -321,7 +351,7 @@ mod tests {
     fn hybrid_search_over_an_empty_vault_returns_no_results_without_erroring() {
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        reindex(vault.path(), false).unwrap();
+        reindex(vault.path(), false, None).unwrap();
 
         let results = hybrid_search(vault.path(), "anything", 5).unwrap();
         assert!(results.is_empty());
@@ -350,7 +380,7 @@ mod tests {
             "A page about paint colors and interior design choices.",
         );
 
-        reindex(vault.path(), true).unwrap();
+        reindex(vault.path(), true, None).unwrap();
 
         let results = hybrid_search(vault.path(), "How do we handle API rate limits?", 5).unwrap();
         assert!(!results.is_empty());

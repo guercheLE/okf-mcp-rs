@@ -4,13 +4,15 @@
 
 use std::path::PathBuf;
 
+use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_registry::{VaultEntry, VaultRegistry};
 use okf_mcp::manifest::{self, Manifest};
 
 pub fn list() -> anyhow::Result<()> {
     let registry = VaultRegistry::load()?;
+    let output = Output::cli();
     if registry.vaults.is_empty() {
-        println!("No vaults registered. Use `okf-mcp vault add <path> --name <name>`.");
+        output.line("No vaults registered. Use `okf-mcp vault add <path> --name <name>`.");
         return Ok(());
     }
     let mut names: Vec<&String> = registry.vaults.keys().collect();
@@ -23,10 +25,11 @@ pub fn list() -> anyhow::Result<()> {
             ""
         };
         match &entry.description {
-            Some(description) => {
-                println!("{name}{marker}: {} — {description}", entry.path.display())
-            }
-            None => println!("{name}{marker}: {}", entry.path.display()),
+            Some(description) => output.line(&format!(
+                "{name}{marker}: {} — {description}",
+                entry.path.display()
+            )),
+            None => output.line(&format!("{name}{marker}: {}", entry.path.display())),
         }
     }
     Ok(())
@@ -42,7 +45,7 @@ pub fn add(path: &str, name: &str, description: Option<&str>) -> anyhow::Result<
         },
     );
     registry.save()?;
-    println!("Registered vault '{name}' -> {path}");
+    Output::cli().line(&format!("Registered vault '{name}' -> {path}"));
     Ok(())
 }
 
@@ -69,7 +72,7 @@ pub fn create(path: &str, name: &str, description: Option<&str>) -> anyhow::Resu
     manifest::store::save(&root, &Manifest::default())?;
 
     add(path, name, description)?;
-    println!("Created vault '{name}' at {path}");
+    Output::cli().line(&format!("Created vault '{name}' at {path}"));
     Ok(())
 }
 
@@ -82,7 +85,7 @@ pub fn remove(name: &str) -> anyhow::Result<()> {
         registry.default = None;
     }
     registry.save()?;
-    println!("Removed vault '{name}' from registry.");
+    Output::cli().line(&format!("Removed vault '{name}' from registry."));
     Ok(())
 }
 
@@ -109,12 +112,13 @@ pub fn delete(name: &str, force: bool) -> anyhow::Result<()> {
         );
     }
 
-    println!("Deleting {} ...", path.display());
+    let output = Output::cli();
+    output.line(&format!("Deleting {} ...", path.display()));
     if path.is_dir() {
         std::fs::remove_dir_all(&path)?;
     }
     remove(name)?;
-    println!("Deleted vault '{name}' and its directory.");
+    output.line(&format!("Deleted vault '{name}' and its directory."));
     Ok(())
 }
 
@@ -125,6 +129,6 @@ pub fn default(name: &str) -> anyhow::Result<()> {
     }
     registry.default = Some(name.to_string());
     registry.save()?;
-    println!("Default vault set to '{name}'.");
+    Output::cli().line(&format!("Default vault set to '{name}'."));
     Ok(())
 }

@@ -1,24 +1,32 @@
 // Standalone `okf-mcp compile` command.
 
 use okf_mcp::compiler::{self, CompileOptions};
+use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_resolver::resolve_vault;
 use okf_mcp::storage::{bundle, git};
 
 pub async fn run(model: Option<&str>, diff: bool, vault: Option<&str>) -> anyhow::Result<()> {
     let vault_root = resolve_vault(vault)?;
     let model_spec = compiler::resolve_model_spec(&vault_root, model)?;
+    let output = Output::cli();
 
     if diff {
         // `--diff`: show what would be compiled without calling the LLM.
         let manifest = okf_mcp::manifest::store::load(&vault_root)?;
         for (uri, _) in manifest.active_entries() {
-            println!("{uri}");
+            output.line(uri);
         }
         return Ok(());
     }
 
-    let report =
-        compiler::compile(&vault_root, &model_spec, true, &CompileOptions::default()).await?;
+    let report = compiler::compile(
+        &vault_root,
+        &model_spec,
+        true,
+        &CompileOptions::default(),
+        Some(&output),
+    )
+    .await?;
     report_and_commit(&vault_root, &report, "okf-mcp compile")
 }
 
@@ -41,28 +49,26 @@ pub(crate) fn report_and_commit(
     report: &okf_mcp::compiler::CompileReport,
     commit_summary: &str,
 ) -> anyhow::Result<()> {
-    println!(
+    let output = Output::cli();
+    output.line(&format!(
         "Compiled {} source(s), {} failed.",
         report.sources_processed(),
         report.sources_failed()
-    );
+    ));
     for source in &report.sources {
         if let Some(error) = &source.error {
-            eprintln!("  {} failed: {error}", source.uri);
+            output.line(&format!("  {} failed: {error}", source.uri));
         }
     }
     if report.lint_report.has_errors() {
-        eprintln!(
-            "{}",
-            okf_mcp::validator::report::to_text(&report.lint_report)
-        );
+        output.line(&okf_mcp::validator::report::to_text(&report.lint_report));
     }
 
     if report.sources_failed() > 0 || report.lint_report.has_errors() {
-        eprintln!(
+        output.line(&format!(
             "{} source(s) failed / lint found errors — not committing; fix and re-run compile.",
             report.sources_failed()
-        );
+        ));
         anyhow::bail!("compile finished with errors");
     }
 
@@ -89,9 +95,9 @@ pub(crate) fn report_and_commit(
             report.sources_processed()
         );
         match git::commit(vault_root, &paths, &message) {
-            Ok(outcome) if outcome.committed => println!("Committed changes."),
-            Ok(_) => println!("Nothing to commit."),
-            Err(err) => eprintln!("git commit skipped: {err}"),
+            Ok(outcome) if outcome.committed => output.line("Committed changes."),
+            Ok(_) => output.line("Nothing to commit."),
+            Err(err) => output.line(&format!("git commit skipped: {err}")),
         }
     }
 

@@ -30,6 +30,7 @@ use tokio::sync::Mutex;
 use crate::auth::auth_manager::{AuthManager, header_location_for};
 use crate::compiler::{self, CompileOptions};
 use crate::core::config_schema::Config;
+use crate::core::output::Output;
 use crate::core::vault_registry::VaultRegistry;
 use crate::core::vault_resolver::{resolve_vault, sandbox_path};
 use crate::http::auth_extractor::extract_request_credentials;
@@ -220,6 +221,7 @@ impl OkfServer {
         &self,
         Parameters(args): Parameters<CompileArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let transport = self.config.transport;
         self.run_tool("okf-compile", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
@@ -228,7 +230,10 @@ impl OkfServer {
                 base_url_override: args.base_url_override,
             };
             let diff_only = args.diff.unwrap_or(true);
-            let report = compiler::compile(&vault_root, &model_spec, diff_only, &options).await?;
+            let output = Output::for_transport(transport);
+            let report =
+                compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
+                    .await?;
             compile_report_to_json(&report)
         })
         .await
@@ -242,6 +247,7 @@ impl OkfServer {
         &self,
         Parameters(args): Parameters<RebuildArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let transport = self.config.transport;
         self.run_tool("okf-rebuild", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
@@ -250,7 +256,10 @@ impl OkfServer {
                 base_url_override: args.base_url_override,
             };
             let diff_only = !args.force.unwrap_or(false);
-            let report = compiler::compile(&vault_root, &model_spec, diff_only, &options).await?;
+            let output = Output::for_transport(transport);
+            let report =
+                compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
+                    .await?;
             compile_report_to_json(&report)
         })
         .await
@@ -290,10 +299,12 @@ impl OkfServer {
         &self,
         Parameters(args): Parameters<ReindexArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let transport = self.config.transport;
         self.run_tool("okf-reindex", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let embeddings = args.embeddings.unwrap_or(false);
-            let report = search::reindex(&vault_root, embeddings)?;
+            let output = Output::for_transport(transport);
+            let report = search::reindex(&vault_root, embeddings, Some(&output))?;
             Ok(serde_json::to_value(report)?)
         })
         .await

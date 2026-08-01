@@ -1,6 +1,7 @@
 // `okf-mcp search`: queries a vault's `.okf/index.db` (hybrid BM25 +
 // dense-vector, merged via RRF — see `okf_mcp::search::hybrid_search`).
 
+use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_registry::VaultRegistry;
 use okf_mcp::core::vault_resolver::resolve_vault;
 use okf_mcp::search::{SearchResult, hybrid_search};
@@ -40,24 +41,29 @@ fn search_all_vaults(query: &str, limit: usize) -> anyhow::Result<Vec<(String, S
 }
 
 fn print_results(results: &[SearchResult], json: bool) -> anyhow::Result<()> {
+    let output = Output::cli();
     if json {
-        println!("{}", serde_json::to_string_pretty(results)?);
+        output.line(&serde_json::to_string_pretty(results)?);
         return Ok(());
     }
     if results.is_empty() {
-        println!("No results.");
+        output.line("No results.");
         return Ok(());
     }
     for result in results {
-        println!("{:.4}  {}  — {}", result.score, result.path, result.title);
+        output.line(&format!(
+            "{:.4}  {}  — {}",
+            result.score, result.path, result.title
+        ));
         if !result.snippet.is_empty() {
-            println!("        {}", result.snippet);
+            output.line(&format!("        {}", result.snippet));
         }
     }
     Ok(())
 }
 
 fn print_tagged_results(results: &[(String, SearchResult)], json: bool) -> anyhow::Result<()> {
+    let output = Output::cli();
     if json {
         let value: Vec<serde_json::Value> = results
             .iter()
@@ -69,20 +75,20 @@ fn print_tagged_results(results: &[(String, SearchResult)], json: bool) -> anyho
                 value
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        output.line(&serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
     if results.is_empty() {
-        println!("No results.");
+        output.line("No results.");
         return Ok(());
     }
     for (vault, result) in results {
-        println!(
+        output.line(&format!(
             "{:.4}  [{vault}] {}  — {}",
             result.score, result.path, result.title
-        );
+        ));
         if !result.snippet.is_empty() {
-            println!("        {}", result.snippet);
+            output.line(&format!("        {}", result.snippet));
         }
     }
     Ok(())
