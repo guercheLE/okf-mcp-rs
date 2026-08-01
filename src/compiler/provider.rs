@@ -11,10 +11,16 @@ use genai::{Client, ModelIden, ServiceTarget};
 
 use crate::core::credential_storage::load_credential;
 
-struct ProviderSpec {
-    adapter_kind: AdapterKind,
+/// Every provider `provider_spec` knows how to route — shared by
+/// `test_connection`'s multi-provider probe and `cli::config`'s
+/// credential-presence listing, so both stay in sync with this module's
+/// actual routing table instead of re-declaring the list a third time.
+pub(crate) const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai", "groq", "ollama", "custom"];
+
+pub(crate) struct ProviderSpec {
+    pub(crate) adapter_kind: AdapterKind,
     /// `None` for providers that need no key (Ollama, run locally).
-    api_key_env: Option<&'static str>,
+    pub(crate) api_key_env: Option<&'static str>,
     /// Env var name that, if set, overrides `default_base_url`.
     base_url_env: Option<&'static str>,
     /// `None` only for `custom`, which has no sensible default — it must
@@ -22,7 +28,7 @@ struct ProviderSpec {
     default_base_url: Option<&'static str>,
 }
 
-fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
+pub(crate) fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
     Ok(match provider {
         "anthropic" => ProviderSpec {
             adapter_kind: AdapterKind::Anthropic,
@@ -57,7 +63,8 @@ fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
             default_base_url: None,
         },
         other => anyhow::bail!(
-            "unknown LLM provider '{other}' — supported: anthropic, openai, groq, ollama, custom"
+            "unknown LLM provider '{other}' — supported: {}",
+            KNOWN_PROVIDERS.join(", ")
         ),
     })
 }
@@ -102,6 +109,76 @@ fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
     }
 }
 
+/// Resolves everything `genai` needs to target a provider — the adapter
+/// kind, endpoint (scheme/trailing-slash normalized), and auth — from
+/// `provider_spec`'s hardcoded defaults, an optional vault-config
+/// `base_url_override`/`api_key_env_override`, and (for the API key) the
+/// OS keychain/encrypted-file fallback `okf-mcp setup` writes to. Shared
+/// by `execute_compile_prompt` and `test_connection`'s per-provider probe
+/// so both resolve a provider's target identically.
+pub(crate) fn resolve_provider_target(
+    provider: &str,
+    base_url_override: Option<&str>,
+    api_key_env_override: Option<&str>,
+) -> anyhow::Result<(AdapterKind, Endpoint, AuthData)> {
+    let spec = provider_spec(provider)?;
+
+    // A vault's `.okf/config.toml` [providers.<name>].api_key_env, if
+    // set, takes precedence over the hardcoded default for this provider.
+    let api_key_env = api_key_env_override.or(spec.api_key_env);
+
+    if let Some(env_name) = api_key_env {
+        seed_env_from_credential_storage(env_name, provider);
+    }
+
+    let auth = match api_key_env {
+        Some(env_name) => AuthData::from_env(env_name),
+        None => AuthData::None,
+    };
+
+    let mut base_url = base_url_override
+        .map(str::to_string)
+        .or_else(|| {
+            spec.base_url_env
+                .and_then(|env_name| std::env::var(env_name).ok())
+        })
+        .or_else(|| spec.default_base_url.map(str::to_string))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "provider '{provider}' has no default base URL — set {} or pass a base URL override",
+                spec.base_url_env.unwrap_or("its base URL")
+            )
+        })?;
+
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        base_url = format!("http://{base_url}");
+    }
+    if !base_url.ends_with('/') {
+        base_url.push('/');
+    }
+
+    Ok((spec.adapter_kind, Endpoint::from_owned(base_url), auth))
+}
+
+/// Whether `err` looks like the provider rejected the *model name* itself
+/// (as opposed to e.g. an auth failure or a network error) — an HTTP
+/// 404/400 whose body mentions "model". Used to decide whether to append
+/// the provider's available-model list to the error.
+fn looks_like_model_not_found(err: &genai::Error) -> bool {
+    let status_body = match err {
+        genai::Error::WebModelCall { webc_error, .. }
+        | genai::Error::WebAdapterCall { webc_error, .. } => match webc_error {
+            genai::webc::Error::ResponseFailedStatus { status, body, .. } => Some((*status, body)),
+            _ => None,
+        },
+        _ => None,
+    };
+    status_body.is_some_and(|(status, body)| {
+        (status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::BAD_REQUEST)
+            && body.to_lowercase().contains("model")
+    })
+}
+
 pub struct LLMCompilerDriver {
     client: Client,
 }
@@ -132,47 +209,13 @@ impl LLMCompilerDriver {
         api_key_env_override: Option<&str>,
     ) -> anyhow::Result<String> {
         let (provider, model_name) = parse_model_spec(full_model_spec)?;
-        let spec = provider_spec(provider)?;
-
-        // A vault's `.okf/config.toml` [providers.<name>].api_key_env, if
-        // set, takes precedence over the hardcoded default for this provider.
-        let api_key_env = api_key_env_override.or(spec.api_key_env);
-
-        if let Some(env_name) = api_key_env {
-            seed_env_from_credential_storage(env_name, provider);
-        }
-
-        let auth = match api_key_env {
-            Some(env_name) => AuthData::from_env(env_name),
-            None => AuthData::None,
-        };
-
-        let mut base_url = base_url_override
-            .map(str::to_string)
-            .or_else(|| {
-                spec.base_url_env
-                    .and_then(|env_name| std::env::var(env_name).ok())
-            })
-            .or_else(|| spec.default_base_url.map(str::to_string))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "provider '{provider}' has no default base URL — set {} or pass a base URL override",
-                    spec.base_url_env.unwrap_or("its base URL")
-                )
-            })?;
-
-        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
-            base_url = format!("http://{base_url}");
-        }
-        if !base_url.ends_with('/') {
-            base_url.push('/');
-        }
-        let endpoint = Endpoint::from_owned(base_url);
+        let (adapter_kind, endpoint, auth) =
+            resolve_provider_target(provider, base_url_override, api_key_env_override)?;
 
         let target = ServiceTarget {
-            endpoint,
-            auth,
-            model: ModelIden::new(spec.adapter_kind, model_name),
+            endpoint: endpoint.clone(),
+            auth: auth.clone(),
+            model: ModelIden::new(adapter_kind, model_name),
         };
 
         let chat_req = ChatRequest::new(vec![
@@ -185,10 +228,32 @@ impl LLMCompilerDriver {
             options = options.with_temperature(temperature as f64);
         }
 
-        let response = self
+        let response = match self
             .client
             .exec_chat(target, chat_req, Some(&options))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let mut message = err.to_string();
+                if looks_like_model_not_found(&err) {
+                    match self
+                        .client
+                        .all_model_names(adapter_kind, (endpoint, auth))
+                        .await
+                    {
+                        Ok(models) => message.push_str(&format!(
+                            "\n\navailable models for '{provider}': {}",
+                            models.join(", ")
+                        )),
+                        Err(list_err) => message.push_str(&format!(
+                            "\n\n(could not list available models for '{provider}': {list_err})"
+                        )),
+                    }
+                }
+                return Err(anyhow::anyhow!(message));
+            }
+        };
         response
             .first_text()
             .map(str::to_string)
@@ -199,6 +264,58 @@ impl LLMCompilerDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn web_model_call_error(status: reqwest::StatusCode, body: &str) -> genai::Error {
+        genai::Error::WebModelCall {
+            model_iden: ModelIden::new(AdapterKind::Anthropic, "claude-bogus"),
+            webc_error: genai::webc::Error::ResponseFailedStatus {
+                status,
+                body: body.to_string(),
+                headers: Box::new(reqwest::header::HeaderMap::new()),
+            },
+        }
+    }
+
+    #[test]
+    fn looks_like_model_not_found_matches_a_404_mentioning_model() {
+        let err = web_model_call_error(
+            reqwest::StatusCode::NOT_FOUND,
+            "model: claude-bogus not found",
+        );
+        assert!(looks_like_model_not_found(&err));
+    }
+
+    #[test]
+    fn looks_like_model_not_found_matches_a_400_mentioning_model_case_insensitively() {
+        let err = web_model_call_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            "The Model 'claude-bogus' does not exist",
+        );
+        assert!(looks_like_model_not_found(&err));
+    }
+
+    #[test]
+    fn looks_like_model_not_found_does_not_match_an_unrelated_404() {
+        let err = web_model_call_error(reqwest::StatusCode::NOT_FOUND, "route not found");
+        assert!(!looks_like_model_not_found(&err));
+    }
+
+    #[test]
+    fn looks_like_model_not_found_does_not_match_a_500() {
+        let err = web_model_call_error(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "model unavailable",
+        );
+        assert!(!looks_like_model_not_found(&err));
+    }
+
+    #[test]
+    fn looks_like_model_not_found_does_not_match_a_non_web_call_error() {
+        let err = genai::Error::NoAuthData {
+            model_iden: ModelIden::new(AdapterKind::Anthropic, "claude-bogus"),
+        };
+        assert!(!looks_like_model_not_found(&err));
+    }
 
     #[test]
     fn parse_model_spec_splits_provider_and_model() {
@@ -235,7 +352,7 @@ mod tests {
 
     #[test]
     fn provider_spec_covers_every_documented_provider() {
-        for provider in ["anthropic", "openai", "groq", "ollama", "custom"] {
+        for provider in KNOWN_PROVIDERS {
             assert!(provider_spec(provider).is_ok(), "{provider} should resolve");
         }
     }
