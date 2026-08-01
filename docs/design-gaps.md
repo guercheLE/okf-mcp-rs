@@ -64,6 +64,12 @@ Update this file in tandem with [CHANGELOG.md](../CHANGELOG.md): whenever a futu
 **What it took:** an invalid model name surfaced whatever raw HTTP error the provider happened to return, with no indication of valid alternatives, until a follow-up feature added a same-request model-list lookup on failure.
 **Lesson:** for any CLI whose primary interaction is "pass a string identifier the tool doesn't validate ahead of time," design docs should set an explicit bar for error quality — especially when the tool already has the information on hand (a live connection, a known enum) to make the error self-service instead of sending the user elsewhere.
 
+### Gap: a provider's default value was never checked against the library's own routing logic
+**Fixed in:** `v0.4.0`
+**What was missing:** `compiler::provider::provider_spec`'s hardcoded Anthropic default base URL (`https://api.anthropic.com`) was written by pattern-matching the other providers' entries, without tracing how the underlying `genai` crate's adapter actually builds a request URL from that value (`format!("{base_url}messages")` — string concatenation, no path-joining logic).
+**What it took:** every `compile`/`rebuild`/`run` call against Anthropic silently 404'd with an empty response body, since the missing `/v1/` segment produced `https://api.anthropic.com` + `messages` = a URL Anthropic's API doesn't serve. Same underlying bug class as the already-documented Ollama trailing-slash gap, just triggered from the *missing-segment* end instead of the *missing-slash* end.
+**Lesson:** when a design or implementation hardcodes a default value that feeds into a third-party library's URL/path construction, verify it against that library's actual construction logic (read the adapter source, don't just copy a value that "looks right"), and add a same-shape regression test per provider (assert the constructed request URL, not just that the default string is non-empty) — the whole class of "right-looking default, wrong shape" bugs is otherwise invisible until a live call 404s.
+
 ### Gap: diagnostic/introspection commands not re-scoped after an architecture pivot
 **Fixed in:** `v0.3.0`
 **What was missing:** this project's `v0.2.0` release rebuilt it from a single-integration Firecrawl proxy into a multi-provider OKF pipeline (see `feat!: rebuild okf-mcp as an OKF pipeline engine, replacing the generic Firecrawl proxy`); `test-connection` and `config` were never revisited after that pivot, so they stayed Firecrawl-only for two more releases.

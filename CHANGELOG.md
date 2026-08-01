@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Six more LLM providers alongside Anthropic/OpenAI/Groq/Ollama: Gemini, OpenRouter, DeepSeek, xAI, Together, Ollama Cloud, and Moonshot, each with genai-matched default base URLs and documented API key env vars.
+- `--tag` is now repeatable on `ingest`/`run` (`--tag github --tag repository --tag mcpify`), stored as a list in `raw/*.md` frontmatter instead of accepting only one value.
+
+### Fixed
+- Anthropic's hardcoded default base URL was missing the `/v1` path segment (`https://api.anthropic.com` instead of `https://api.anthropic.com/v1/`), producing a silent 404 with an empty body on every `compile`/`rebuild`/`run` call — the same "trailing path segment" bug class as the already-documented Ollama gap, just on the other end of the URL.
+- `source_url` in `raw/*.md` frontmatter was left `null` for local files even though `ingest::pipeline::normalize_local_uri` already computes a stable `file://<canonical path>` URI and uses it as the manifest key — now reused verbatim instead of leaving a second, potentially-diverging identifier unset.
+
 ## [0.3.1] - 2026-08-01
 
 ### Changed
