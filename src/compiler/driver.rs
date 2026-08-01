@@ -79,9 +79,14 @@ fn referenced_raw_ids(vault_root: &Path) -> anyhow::Result<HashSet<String>> {
     Ok(ids)
 }
 
-/// `diff_only` = every `ACTIVE` manifest entry not yet referenced by any
-/// wiki page's `sources:`; otherwise (a `rebuild --force`) every `ACTIVE`
-/// entry, regardless of whether it's already compiled.
+/// `diff_only` = every `ACTIVE` manifest entry that's neither (a) already
+/// referenced by some wiki page's `sources:` — a safety net for vaults
+/// compiled before `compiled_hash` existed, where the wiki already
+/// reflects a source but the manifest doesn't know it yet — nor (b)
+/// marked `compiled_hash == active_hash` in the manifest, the
+/// authoritative "fully compiled at its current content" signal
+/// (`Manifest::is_compiled_at_current_hash`). Otherwise (a `rebuild
+/// --force`) every `ACTIVE` entry, regardless of either check.
 fn select_sources(
     vault_root: &Path,
     manifest: &Manifest,
@@ -97,7 +102,9 @@ fn select_sources(
     let referenced = referenced_raw_ids(vault_root)?;
     Ok(active
         .into_iter()
-        .filter(|(_, raw_id)| !referenced.contains(raw_id))
+        .filter(|(uri, raw_id)| {
+            !referenced.contains(raw_id) && !manifest.is_compiled_at_current_hash(uri)
+        })
         .collect())
 }
 
@@ -227,7 +234,7 @@ pub async fn compile(
     diff_only: bool,
     options: &CompileOptions,
 ) -> anyhow::Result<CompileReport> {
-    let manifest = manifest::store::load(vault_root)?;
+    let mut manifest = manifest::store::load(vault_root)?;
     let sources = select_sources(vault_root, &manifest, diff_only)?;
 
     let driver = LLMCompilerDriver::new();
@@ -242,6 +249,16 @@ pub async fn compile(
         {
             Ok(mut paths) => {
                 touched_paths.append(&mut paths);
+                // Marked and saved immediately, per source — not batched
+                // until the end of the loop — so a crash/kill partway
+                // through a run leaves already-succeeded sources durably
+                // resumable on the next `compile`. Independent of
+                // `report_and_commit`'s later pass/fail gate: manifest.json
+                // is never part of the git-staged path list, so it must
+                // keep persisting regardless of whether the overall run
+                // later gets treated as failed.
+                manifest.mark_compiled(&uri);
+                manifest::store::save(vault_root, &manifest)?;
                 outcomes.push(SourceOutcome {
                     uri,
                     raw_id,
@@ -326,6 +343,23 @@ mod tests {
         manifest.record_ingest("uri-b", "sha256:bbb", "raw_bbb", "t0");
 
         write_concept(vault.path(), "already-compiled", &["/raw/raw_aaa.md"]);
+
+        let selected = select_sources(vault.path(), &manifest, true).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].1, "raw_bbb");
+    }
+
+    #[test]
+    fn select_sources_diff_only_also_skips_sources_already_compiled_at_the_current_hash() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri-a", "sha256:aaa", "raw_aaa", "t0");
+        manifest.record_ingest("uri-b", "sha256:bbb", "raw_bbb", "t0");
+        // Marked compiled but with NO wiki page written for it — only the
+        // new compiled_hash check (not the older referenced-raw-ids scan)
+        // can catch this one.
+        manifest.mark_compiled("uri-a");
 
         let selected = select_sources(vault.path(), &manifest, true).unwrap();
         assert_eq!(selected.len(), 1);

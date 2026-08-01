@@ -35,6 +35,15 @@ pub struct SourceVersion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SourceEntry {
     pub active_hash: Option<String>,
+    /// The `active_hash` value at which this source last *fully* compiled
+    /// without error, or `None` if it never has. Compared against
+    /// `active_hash` (not stored as a boolean) so a re-ingest — which
+    /// changes `active_hash` — automatically invalidates it without a
+    /// separate "clear" step. `#[serde(default)]` so vaults whose
+    /// `manifest.json` predates this field deserialize with `None` rather
+    /// than failing.
+    #[serde(default)]
+    pub compiled_hash: Option<String>,
     pub history: Vec<SourceVersion>,
 }
 
@@ -148,6 +157,24 @@ impl Manifest {
     /// caller knows which `raw_id`s to unlink.
     pub fn purge(&mut self, uri: &str) -> Option<SourceEntry> {
         self.sources.remove(uri)
+    }
+
+    /// Marks `uri`'s currently-active hash as successfully, fully compiled
+    /// — call only after every operation for that source's compile batch
+    /// has applied without error. A no-op if `uri` has no active entry.
+    pub fn mark_compiled(&mut self, uri: &str) {
+        if let Some(entry) = self.sources.get_mut(uri) {
+            entry.compiled_hash = entry.active_hash.clone();
+        }
+    }
+
+    /// Whether `uri` has already been fully compiled at its *current*
+    /// active hash — the authoritative "does this source need
+    /// (re)compiling" check `compiler::driver::select_sources` uses.
+    pub fn is_compiled_at_current_hash(&self, uri: &str) -> bool {
+        self.sources.get(uri).is_some_and(|entry| {
+            entry.compiled_hash.is_some() && entry.compiled_hash == entry.active_hash
+        })
     }
 
     /// Every `(uri, active SourceVersion)` pair — the set `compile`/`reindex`
@@ -284,5 +311,62 @@ mod tests {
         let restored: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.get_active_raw_id("uri"), Some("raw_bbb"));
         assert_eq!(restored.sources["uri"].history.len(), 2);
+    }
+
+    #[test]
+    fn a_manifest_json_without_the_compiled_hash_field_still_deserializes() {
+        let json = r#"{"sources":{"uri":{"active_hash":"sha256:aaa","history":[]}}}"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.sources["uri"].compiled_hash, None);
+    }
+
+    #[test]
+    fn mark_compiled_sets_compiled_hash_to_the_current_active_hash() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.mark_compiled("uri");
+        assert_eq!(
+            manifest.sources["uri"].compiled_hash.as_deref(),
+            Some("sha256:aaa")
+        );
+    }
+
+    #[test]
+    fn mark_compiled_on_an_unknown_uri_is_a_no_op() {
+        let mut manifest = Manifest::default();
+        manifest.mark_compiled("nope");
+        assert!(!manifest.sources.contains_key("nope"));
+    }
+
+    #[test]
+    fn is_compiled_at_current_hash_is_false_until_marked() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        assert!(!manifest.is_compiled_at_current_hash("uri"));
+        manifest.mark_compiled("uri");
+        assert!(manifest.is_compiled_at_current_hash("uri"));
+    }
+
+    #[test]
+    fn is_compiled_at_current_hash_is_false_for_an_unknown_uri() {
+        let manifest = Manifest::default();
+        assert!(!manifest.is_compiled_at_current_hash("nope"));
+    }
+
+    #[test]
+    fn re_ingesting_after_a_compile_invalidates_the_compiled_flag() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.mark_compiled("uri");
+        assert!(manifest.is_compiled_at_current_hash("uri"));
+
+        manifest.record_ingest("uri", "sha256:bbb", "raw_bbb", "t1");
+        assert!(!manifest.is_compiled_at_current_hash("uri"));
+        // The stale compiled_hash from the previous content is still on
+        // disk (not cleared), it's just no longer equal to active_hash.
+        assert_eq!(
+            manifest.sources["uri"].compiled_hash.as_deref(),
+            Some("sha256:aaa")
+        );
     }
 }
