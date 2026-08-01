@@ -21,6 +21,14 @@ There's already an uncommitted, in-progress `vault remove`/`rm` (registry-only u
 
 **Process note:** before starting item 0, copy this plan into the repo at `docs/plan-2026-08-fixes.md` and commit it on its own (e.g. `docs: add plan for reported-issues batch`) — so the plan lives in the repo's history before any code changes land. At the end of the batch (after item 15), re-commit that file if anything in it picked up fixes/comments/corrections during implementation (e.g. a design that changed once actually coded).
 
+**Post-approval additions (discovered/requested during implementation, not in the original 15-item design above):**
+- **Item 0 also fixes a HOME-mutating test race**: verifying "CI is genuinely green" (not just past the fmt gate) surfaced a pre-existing, unrelated bug — `credential_storage`'s and `config_manager`'s tests both mutate the global `HOME` env var with no synchronization, which `cargo test`'s default parallel execution can interleave, breaking `encryption_key()`'s HOME-derived key non-deterministically. Fixed with a shared `HOME_ENV_TEST_LOCK` mutex, as its own commit within item 0.
+- **`--help` text for `--model`** (`compile`/`rebuild`/`run`) now recommends an 8B-9B local instruct model as the speed/quality sweet spot — requested mid-implementation, its own commit.
+- **`CHANGELOG.md`**: added retrospectively from git log in Keep a Changelog format, covering the full history (initial commit through 0.3.0) — requested mid-implementation, done after the version bump so the final entry is accurate.
+- **`docs/design-gaps.md`**: a retrospective pairing each fix/feature in this batch with what `okf-pipeline-design.md`/`okf-mcp-implementation-plan.md` failed to specify clearly enough to prevent it, plus a generalizable lesson for other projects' planning docs — requested mid-implementation, to be updated in tandem with `CHANGELOG.md` going forward.
+
+All 15 originally-designed items shipped as one commit each, matching the design in each item's section below with no material deviations.
+
 ## Implementation order (real code dependencies)
 
 ```
