@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-08-01
+
+### Added
+- `lint --fix`: mechanically repairs auto-fixable lint findings — missing `.md` extensions on `sources:` entries and `tid:`/`id:` frontmatter typos — before reporting. Never calls an LLM, matching `lint`'s own design intent.
+- `compile`/`rebuild`/`run --fix`: the same mechanical repairs, plus LLM-assisted synthesis of a missing concept page for any broken link still remaining afterward, grounded only in the raw sources the referencing pages already cite. New `--yes`/`-y` skips the confirmation prompt required before committing LLM-synthesized changes; a non-interactive session never auto-commits without it.
+- MCP tool parity: `fix` argument on `okf-lint`/`okf-compile`/`okf-rebuild`.
+
+### Fixed
+- Wikilink parsing had no support for Obsidian's piped-alias syntax (`[[target|display text]]`) — every such link was reported as broken regardless of whether its target existed, since the entire `target|display text` string was used as the lookup slug. `[[target|display text]]` now resolves on `target` only.
+
 ## [0.5.0] - 2026-08-01
 
 ### Added
@@ -71,6 +81,7 @@ A batch of fixes and small features from real-world usage feedback: vault lifecy
 ### Added
 - Initial commit.
 
+[0.6.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.1...v0.4.0
