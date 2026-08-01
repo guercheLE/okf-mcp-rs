@@ -85,6 +85,15 @@ pub struct RebuildArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ModelsArgs {
+    /// anthropic, openai, groq, gemini, openrouter, deepseek, xai, together,
+    /// ollama-cloud, moonshot, ollama, or custom
+    pub provider: String,
+    #[serde(default)]
+    pub vault: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LintArgs {
     /// Also fail on warnings (orphan pages), not just broken links/sources
     #[serde(default)]
@@ -264,6 +273,32 @@ impl OkfServer {
                 compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
                     .await?;
             compile_report_to_json(&report)
+        })
+        .await
+    }
+
+    #[tool(
+        name = "okf-list-models",
+        description = "List a provider's available models (e.g. before picking a model for okf-compile)."
+    )]
+    async fn list_models(
+        &self,
+        Parameters(args): Parameters<ModelsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("okf-list-models", async move {
+            let options = match resolve_vault(args.vault.as_deref()) {
+                Ok(vault_root) => {
+                    compiler::vault_provider_options_for_provider(&vault_root, &args.provider)?
+                }
+                Err(_) => CompileOptions::default(),
+            };
+            let models = compiler::list_models(
+                &args.provider,
+                options.base_url_override.as_deref(),
+                options.api_key_env_override.as_deref(),
+            )
+            .await?;
+            Ok(serde_json::json!({ "provider": args.provider, "models": models }))
         })
         .await
     }
@@ -664,6 +699,7 @@ mod tests {
                 "okf-delete",
                 "okf-ingest",
                 "okf-lint",
+                "okf-list-models",
                 "okf-list-vaults",
                 "okf-read-concept",
                 "okf-read-index",

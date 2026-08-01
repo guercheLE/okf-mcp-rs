@@ -338,6 +338,27 @@ impl LLMCompilerDriver {
             .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("LLM returned an empty response"))
     }
+
+    /// Lists a provider's available model names — same target resolution
+    /// as `execute_compile_prompt` (vault-config overrides, keychain-seeded
+    /// credentials), but without sending a chat request. Per `genai`'s own
+    /// doc comment on `all_model_names`: only the Ollama adapter does a
+    /// live query against its host; the other adapters return a static,
+    /// crate-baked-in list — a successful call for those only proves the
+    /// endpoint/auth resolved, not that the key is actually valid.
+    pub async fn list_models(
+        &self,
+        provider: &str,
+        base_url_override: Option<&str>,
+        api_key_env_override: Option<&str>,
+    ) -> anyhow::Result<Vec<String>> {
+        let (adapter_kind, endpoint, auth) =
+            resolve_provider_target(provider, base_url_override, api_key_env_override)?;
+        self.client
+            .all_model_names(adapter_kind, (endpoint, auth))
+            .await
+            .map_err(|err| anyhow::anyhow!("could not list models for '{provider}': {err}"))
+    }
 }
 
 #[cfg(test)]
@@ -400,6 +421,74 @@ mod tests {
         // `.with_web_config(...)` call and reintroduce the hang.
         assert_eq!(LLM_REQUEST_TIMEOUT, std::time::Duration::from_secs(300));
         let _driver = LLMCompilerDriver::new();
+    }
+
+    /// Minimal HTTP/1.1 server returning a fixed response to the first
+    /// request it receives, matching `cli::test_connection`'s own mock
+    /// server pattern.
+    async fn mock_server(status: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn list_models_returns_ollamas_live_model_list() {
+        // Ollama's adapter is the one genai adapter that does a real
+        // network call for `all_model_names` (`GET {base_url}api/tags`) —
+        // exercising it end-to-end here (mock server, no real Ollama
+        // needed) covers `LLMCompilerDriver::list_models`'s full path:
+        // `resolve_provider_target` -> `client.all_model_names`.
+        let base_url = mock_server(
+            "200 OK",
+            r#"{"models":[{"name":"llama3.1:8b"},{"name":"llama3.1:70b"}]}"#,
+        )
+        .await;
+
+        let driver = LLMCompilerDriver::new();
+        let models = driver
+            .list_models("ollama", Some(&base_url), None)
+            .await
+            .unwrap();
+        assert_eq!(models, vec!["llama3.1:8b", "llama3.1:70b"]);
+    }
+
+    #[tokio::test]
+    async fn list_models_rejects_an_unknown_provider() {
+        let driver = LLMCompilerDriver::new();
+        let err = driver
+            .list_models("not-a-real-provider", None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown LLM provider"));
+    }
+
+    #[tokio::test]
+    async fn list_models_for_custom_without_a_base_url_fails_clearly() {
+        // "custom" has no hardcoded default base URL — without a vault
+        // override or CUSTOM_LLM_BASE_URL set, resolution must fail with a
+        // clear message rather than panicking or hanging.
+        // SAFETY: test-only env mutation; ensures a stray var from another
+        // test/process doesn't make this one flaky.
+        unsafe {
+            std::env::remove_var("CUSTOM_LLM_BASE_URL");
+        }
+        let driver = LLMCompilerDriver::new();
+        let err = driver.list_models("custom", None, None).await.unwrap_err();
+        assert!(err.to_string().contains("no default base URL"));
     }
 
     #[test]

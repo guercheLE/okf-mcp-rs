@@ -74,6 +74,18 @@ pub fn vault_provider_options(
     model_spec: &str,
 ) -> anyhow::Result<CompileOptions> {
     let (provider, _) = super::provider::parse_model_spec(model_spec)?;
+    vault_provider_options_for_provider(vault_root, provider)
+}
+
+/// Same lookup as `vault_provider_options`, but keyed directly on a
+/// provider name rather than a full `<provider>/<model>` spec — for
+/// callers (e.g. `okf-mcp models <provider>`) that don't have a model name
+/// on hand yet, since listing available models is exactly how a user picks
+/// one.
+pub fn vault_provider_options_for_provider(
+    vault_root: &Path,
+    provider: &str,
+) -> anyhow::Result<CompileOptions> {
     let vault_config = load_vault_config(vault_root)?;
     let provider_config = vault_config.providers.get(provider);
     Ok(CompileOptions {
@@ -81,6 +93,19 @@ pub fn vault_provider_options(
         base_url_override: provider_config.and_then(|p| p.base_url.clone()),
         api_key_env_override: provider_config.and_then(|p| p.api_key_env.clone()),
     })
+}
+
+/// Lists a provider's available model names — the same lookup
+/// `execute_compile_prompt`'s model-not-found hint uses, exposed directly
+/// as its own operation for `okf-mcp models <provider>`.
+pub async fn list_models(
+    provider: &str,
+    base_url_override: Option<&str>,
+    api_key_env_override: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    super::provider::LLMCompilerDriver::new()
+        .list_models(provider, base_url_override, api_key_env_override)
+        .await
 }
 
 fn referenced_raw_ids(vault_root: &Path) -> anyhow::Result<HashSet<String>> {
@@ -417,6 +442,31 @@ mod tests {
         let options = vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
         assert_eq!(options.base_url_override, None);
         assert_eq!(options.api_key_env_override, None);
+    }
+
+    #[test]
+    fn vault_provider_options_for_provider_reads_the_same_entry_by_bare_provider_name() {
+        // The `okf-mcp models <provider>` path doesn't have a model name to
+        // extract a provider from — it calls this directly instead of
+        // going through `vault_provider_options`'s `<provider>/<model>`
+        // split, and must resolve to the same override.
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        std::fs::write(
+            vault.path().join(".okf/config.toml"),
+            "[providers.custom]\napi_key_env = \"MY_CUSTOM_KEY\"\nbase_url = \"http://localhost:9999\"\n",
+        )
+        .unwrap();
+
+        let options = vault_provider_options_for_provider(vault.path(), "custom").unwrap();
+        assert_eq!(
+            options.base_url_override.as_deref(),
+            Some("http://localhost:9999")
+        );
+        assert_eq!(
+            options.api_key_env_override.as_deref(),
+            Some("MY_CUSTOM_KEY")
+        );
     }
 
     fn write_concept(vault_root: &Path, slug: &str, sources: &[&str]) {

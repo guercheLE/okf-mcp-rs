@@ -63,7 +63,8 @@ enum Command {
         /// Ollama models, an 8B-9B instruct model (e.g. "ollama/llama3.1:8b") is the
         /// best local speed/quality balance for this command; smaller models are
         /// unreliable at compile's structured JSON output, and 12B+ can be very slow
-        /// on constrained hardware
+        /// on constrained hardware; run `okf-mcp models <provider>` to see what's
+        /// actually available
         #[arg(long)]
         model: Option<String>,
         /// Show which sources would be compiled, without calling the LLM
@@ -78,6 +79,12 @@ enum Command {
         /// Recompile every active source, not just unprocessed ones
         #[arg(long)]
         force: bool,
+    },
+    /// List a provider's available models (e.g. before picking `--model`)
+    Models {
+        /// anthropic, openai, groq, gemini, openrouter, deepseek, xai,
+        /// together, ollama-cloud, moonshot, ollama, or custom
+        provider: String,
     },
     /// Check wikilinks, frontmatter, and source provenance in the wiki
     Lint {
@@ -262,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Rebuild { model, force } => {
             cli::rebuild::run(model.as_deref(), force, vault).await
         }
+        Command::Models { provider } => cli::models::run(&provider, vault).await,
         Command::Lint { strict, json } => cli::lint::run(strict, json, vault),
         Command::Reindex { embeddings } => cli::reindex::run(embeddings, vault),
         Command::Search {

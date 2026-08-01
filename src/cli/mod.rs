@@ -8,6 +8,7 @@ pub mod config;
 pub mod delete;
 pub mod ingest;
 pub mod lint;
+pub mod models;
 pub mod rebuild;
 pub mod reindex;
 pub mod run;

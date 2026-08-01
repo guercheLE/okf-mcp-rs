@@ -75,6 +75,7 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 | `ingest` | `<URL\|FILE> [--tag <tag>]...` | Fetch a URL (via Firecrawl) or read a local file and add it to the vault's raw sources; `--tag` is repeatable |
 | `compile` | `[--model] [--diff]` | Compile newly-ingested raw sources into wiki concept pages |
 | `rebuild` | `[--model] [--force]` | Recompile the wiki from all active raw sources |
+| `models` | `<provider>` | List a provider's available models (e.g. before picking `--model`) |
 | `lint` | `[--strict] [--json]` | Check wikilinks, frontmatter, and source provenance in the wiki |
 | `reindex` | `[--embeddings]` | Rebuild the local text and vector index used by search |
 | `search` | `<query> [-l/--limit] [--json] [--all-vaults]` | Search ingested raw sources and compiled wiki concepts |
@@ -96,6 +97,7 @@ Every content-touching subcommand also accepts the global `--vault <name|path>` 
 | `okf-ingest` | `source, tags?, vault?` | Fetch a URL or read a local file and add it to the vault's raw sources |
 | `okf-compile` | `diff?, model?, temperature?, base_url_override?, vault?` | Compile newly-ingested raw sources into wiki concept pages |
 | `okf-rebuild` | `force?, model?, temperature?, base_url_override?, vault?` | Recompile the wiki from all active raw sources |
+| `okf-list-models` | `provider, vault?` | List a provider's available models |
 | `okf-lint` | `strict?, vault?` | Check wikilinks, frontmatter, and source provenance in the wiki |
 | `okf-reindex` | `embeddings?, vault?` | Rebuild the local text and vector index used by search |
 | `okf-search` | `query, limit?, vault?` | Search ingested raw sources and compiled wiki concepts |

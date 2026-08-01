@@ -42,8 +42,8 @@ fn version_help_and_config_are_available() {
     assert!(help.status.success());
     let help_text = stdout(&help);
     for command in [
-        "ingest", "compile", "rebuild", "lint", "reindex", "search", "delete", "run", "vault",
-        "start", "http",
+        "ingest", "compile", "rebuild", "models", "lint", "reindex", "search", "delete", "run",
+        "vault", "start", "http",
     ] {
         assert!(
             help_text.contains(command),
@@ -402,6 +402,28 @@ fn compile_without_a_configured_model_fails_with_a_clear_error() {
     );
     assert!(!compile.status.success());
     assert!(stderr(&compile).contains("no model specified"));
+}
+
+#[test]
+fn models_for_an_unknown_provider_fails_clearly() {
+    let home = tempfile::tempdir().unwrap();
+
+    let models = okf_mcp(&["models", "not-a-real-provider"], home.path());
+    assert!(!models.status.success());
+    assert!(stderr(&models).contains("unknown LLM provider"));
+}
+
+#[test]
+fn models_for_custom_without_a_base_url_fails_clearly() {
+    // No vault, no CUSTOM_LLM_BASE_URL — "custom" has no hardcoded
+    // default, so this should fail with a clear message rather than
+    // hanging or panicking, and works the same whether or not a vault
+    // resolves (this run has none).
+    let home = tempfile::tempdir().unwrap();
+
+    let models = okf_mcp(&["models", "custom"], home.path());
+    assert!(!models.status.success());
+    assert!(stderr(&models).contains("no default base URL"));
 }
 
 #[test]
