@@ -58,7 +58,11 @@ enum Command {
     },
     /// Compile newly-ingested raw sources into wiki concept pages
     Compile {
-        /// "<provider>/<model_name>", e.g. "anthropic/claude-3-5-sonnet"
+        /// "<provider>/<model_name>", e.g. "anthropic/claude-3-5-sonnet" — for local
+        /// Ollama models, an 8B-9B instruct model (e.g. "ollama/llama3.1:8b") is the
+        /// best local speed/quality balance for this command; smaller models are
+        /// unreliable at compile's structured JSON output, and 12B+ can be very slow
+        /// on constrained hardware
         #[arg(long)]
         model: Option<String>,
         /// Show which sources would be compiled, without calling the LLM
@@ -67,6 +71,7 @@ enum Command {
     },
     /// Recompile the wiki from all active raw sources
     Rebuild {
+        /// "<provider>/<model_name>" — see `compile --help` for model-size guidance
         #[arg(long)]
         model: Option<String>,
         /// Recompile every active source, not just unprocessed ones
@@ -108,6 +113,7 @@ enum Command {
         source: String,
         #[arg(long)]
         tag: Option<String>,
+        /// "<provider>/<model_name>" — see `compile --help` for model-size guidance
         #[arg(long)]
         model: Option<String>,
     },
