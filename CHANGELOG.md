@@ -2,10 +2,10 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-01
 
 ### Added
-- Six more LLM providers alongside Anthropic/OpenAI/Groq/Ollama: Gemini, OpenRouter, DeepSeek, xAI, Together, Ollama Cloud, and Moonshot, each with genai-matched default base URLs and documented API key env vars.
+- Seven more LLM providers alongside Anthropic/OpenAI/Groq/Ollama: Gemini, OpenRouter, DeepSeek, xAI, Together, Ollama Cloud, and Moonshot, each with genai-matched default base URLs and documented API key env vars.
 - `--tag` is now repeatable on `ingest`/`run` (`--tag github --tag repository --tag mcpify`), stored as a list in `raw/*.md` frontmatter instead of accepting only one value.
 
 ### Fixed
@@ -61,6 +61,7 @@ A batch of fixes and small features from real-world usage feedback: vault lifecy
 ### Added
 - Initial commit.
 
+[0.4.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.2.0...v0.2.1
