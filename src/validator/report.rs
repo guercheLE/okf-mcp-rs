@@ -9,12 +9,25 @@ pub fn to_json(report: &LintReport) -> anyhow::Result<String> {
 /// Plain-text summary — deliberately not framed as "AI-powered" anything,
 /// just a structural report: what's broken, what's missing, what's unused.
 pub fn to_text(report: &LintReport) -> String {
-    if !report.has_errors() && report.orphan_pages.is_empty() && report.cross_vault_links.is_empty()
+    if !report.has_errors()
+        && report.pending_compiles.is_empty()
+        && report.orphan_pages.is_empty()
+        && report.cross_vault_links.is_empty()
     {
         return "OK: no lint issues found.".to_string();
     }
 
     let mut lines = Vec::new();
+
+    if !report.pending_compiles.is_empty() {
+        lines.push(format!(
+            "Pending compile ({} source(s) not yet fully compiled — run 'okf-mcp compile'):",
+            report.pending_compiles.len()
+        ));
+        for uri in &report.pending_compiles {
+            lines.push(format!("  {uri}"));
+        }
+    }
 
     if !report.broken_links.is_empty() {
         lines.push(format!("Broken links ({}):", report.broken_links.len()));
@@ -94,6 +107,33 @@ mod tests {
         let text = to_text(&report);
         assert!(text.contains("Orphan pages (1, warning)"));
         assert!(text.contains("OK: no blocking issues"));
+    }
+
+    #[test]
+    fn pending_compiles_renders_first_and_does_not_force_a_failed_verdict() {
+        let report = LintReport {
+            pending_compiles: vec!["https://example.com/a".to_string()],
+            ..Default::default()
+        };
+        let text = to_text(&report);
+        assert!(text.contains("Pending compile (1 source(s)"));
+        assert!(text.contains("https://example.com/a"));
+        assert!(text.contains("OK: no blocking issues"));
+        assert!(
+            text.find("Pending compile").unwrap() < text.find("OK:").unwrap(),
+            "pending compile should render before the final verdict line"
+        );
+    }
+
+    #[test]
+    fn pending_compiles_renders_before_broken_links_when_both_are_present() {
+        let report = LintReport {
+            pending_compiles: vec!["https://example.com/a".to_string()],
+            broken_links: vec![("wiki/concepts/a.md".to_string(), "missing".to_string())],
+            ..Default::default()
+        };
+        let text = to_text(&report);
+        assert!(text.find("Pending compile").unwrap() < text.find("Broken links").unwrap());
     }
 
     #[test]

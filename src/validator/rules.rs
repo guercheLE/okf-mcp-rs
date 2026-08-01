@@ -10,11 +10,21 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::manifest;
+
 use super::frontmatter::parse_wiki_page;
 use super::wikilink::{WikiLink, extract_wikilinks};
 
 #[derive(Debug, Default, Serialize)]
 pub struct LintReport {
+    /// Active sources ingested but not (yet, or successfully) compiled at
+    /// their current content — covers both "never ran compile" and
+    /// "compile was interrupted partway through," in one check, via
+    /// `Manifest::is_compiled_at_current_hash`. A warning, not a failure:
+    /// this is normal mid-workflow state, not a defect — the point is
+    /// surfacing the likely root cause of broken-link/missing-source
+    /// symptoms up front, rather than leaving the reader to guess why.
+    pub pending_compiles: Vec<String>,
     /// (wiki page path, missing target slug)
     pub broken_links: Vec<(String, String)>,
     /// concept pages under `./wiki/concepts/` that no other page links to
@@ -66,6 +76,14 @@ pub(crate) fn markdown_files_in(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
     let concepts_dir = vault_root.join("wiki/concepts");
     let mut report = LintReport::default();
+
+    let manifest = manifest::store::load(vault_root)?;
+    report.pending_compiles = manifest
+        .active_entries()
+        .map(|(uri, _)| uri.to_string())
+        .filter(|uri| !manifest.is_compiled_at_current_hash(uri))
+        .collect();
+    report.pending_compiles.sort();
 
     let mut pages = Vec::new();
     let mut existing_slugs: HashSet<String> = HashSet::new();
@@ -256,6 +274,43 @@ mod tests {
         assert!(report.broken_links.is_empty());
         assert_eq!(report.cross_vault_links.len(), 1);
         assert_eq!(report.cross_vault_links[0].1, "personal::journal-entry");
+    }
+
+    #[test]
+    fn an_active_uningested_source_that_was_never_compiled_is_pending() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        let mut manifest = crate::manifest::Manifest::default();
+        manifest.record_ingest("https://example.com/a", "sha256:aaa", "raw_aaa", "t0");
+        crate::manifest::store::save(vault.path(), &manifest).unwrap();
+
+        let report = lint_bundle(vault.path()).unwrap();
+        assert_eq!(
+            report.pending_compiles,
+            vec!["https://example.com/a".to_string()]
+        );
+        // Pending compile is a warning, not a hard error, by itself.
+        assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn marking_a_source_compiled_clears_it_from_pending_compiles() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        let mut manifest = crate::manifest::Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.mark_compiled("uri");
+        crate::manifest::store::save(vault.path(), &manifest).unwrap();
+
+        let report = lint_bundle(vault.path()).unwrap();
+        assert!(report.pending_compiles.is_empty());
+    }
+
+    #[test]
+    fn a_vault_with_no_manifest_yet_has_no_pending_compiles() {
+        let vault = tempfile::tempdir().unwrap();
+        let report = lint_bundle(vault.path()).unwrap();
+        assert!(report.pending_compiles.is_empty());
     }
 
     #[test]
