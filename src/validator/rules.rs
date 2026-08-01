@@ -15,7 +15,7 @@ use crate::manifest;
 use super::frontmatter::parse_wiki_page;
 use super::wikilink::{WikiLink, extract_wikilinks};
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct LintReport {
     /// Active sources ingested but not (yet, or successfully) compiled at
     /// their current content — covers both "never ran compile" and
@@ -212,6 +212,26 @@ mod tests {
 
         let report = lint_bundle(vault.path()).unwrap();
         assert!(report.broken_links.is_empty());
+    }
+
+    #[test]
+    fn a_piped_link_to_an_existing_concept_is_not_broken() {
+        let vault = tempfile::tempdir().unwrap();
+        write_concept(vault.path(), "a", &[], "See [[b|Beta]].");
+        write_concept(vault.path(), "b", &[], "");
+
+        let report = lint_bundle(vault.path()).unwrap();
+        assert!(report.broken_links.is_empty());
+    }
+
+    #[test]
+    fn a_piped_link_to_a_missing_concept_is_still_broken_on_the_target_only() {
+        let vault = tempfile::tempdir().unwrap();
+        write_concept(vault.path(), "a", &[], "See [[missing|Display Text]].");
+
+        let report = lint_bundle(vault.path()).unwrap();
+        assert_eq!(report.broken_links.len(), 1);
+        assert_eq!(report.broken_links[0].1, "missing");
     }
 
     #[test]

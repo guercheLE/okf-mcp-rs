@@ -39,12 +39,20 @@ pub fn extract_wikilinks(body: &str) -> Vec<WikiLink> {
 }
 
 fn parse_link(inner: &str) -> WikiLink {
-    match inner.split_once("::") {
+    // Obsidian alias syntax: everything after the first `|` is display
+    // text, never part of link identity — strip it before any other
+    // parsing, so `[[vault::concept|Display Text]]` and
+    // `[[target|Display Text]]` both resolve on target/vault::concept only.
+    let target = inner
+        .split_once('|')
+        .map_or(inner, |(target, _display)| target);
+
+    match target.split_once("::") {
         Some((vault, concept)) => WikiLink::CrossVault {
             vault: vault.to_string(),
             concept: concept.to_string(),
         },
-        None => WikiLink::Local(inner.to_string()),
+        None => WikiLink::Local(target.to_string()),
     }
 }
 
@@ -96,5 +104,41 @@ mod tests {
     #[test]
     fn a_document_with_no_links_yields_nothing() {
         assert_eq!(extract_wikilinks("just plain text"), Vec::new());
+    }
+
+    #[test]
+    fn parses_a_piped_local_link() {
+        let links = extract_wikilinks("[[api-gateway|the gateway]]");
+        assert_eq!(links, vec![WikiLink::Local("api-gateway".to_string())]);
+    }
+
+    #[test]
+    fn parses_a_piped_cross_vault_link() {
+        let links = extract_wikilinks("[[personal::journal-entry|My Journal]]");
+        assert_eq!(
+            links,
+            vec![WikiLink::CrossVault {
+                vault: "personal".to_string(),
+                concept: "journal-entry".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pipe_with_no_display_text_still_resolves_the_target() {
+        let links = extract_wikilinks("[[api-gateway|]]");
+        assert_eq!(links, vec![WikiLink::Local("api-gateway".to_string())]);
+    }
+
+    #[test]
+    fn multiple_pipes_use_only_the_first_as_the_delimiter() {
+        let links = extract_wikilinks("[[a|b|c]]");
+        assert_eq!(links, vec![WikiLink::Local("a".to_string())]);
+    }
+
+    #[test]
+    fn an_empty_target_before_the_pipe_yields_an_empty_local_slug() {
+        let links = extract_wikilinks("[[|display]]");
+        assert_eq!(links, vec![WikiLink::Local(String::new())]);
     }
 }
