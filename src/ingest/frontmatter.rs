@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::core::okf_schema::OKF_SCHEMA_VERSION;
 use crate::core::vault_resolver::sandbox_path;
-
-const OKF_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawFrontmatter {
@@ -60,7 +59,7 @@ pub fn write_raw_blob(
     content: &str,
 ) -> anyhow::Result<PathBuf> {
     let frontmatter = RawFrontmatter {
-        okf_version: OKF_VERSION.to_string(),
+        okf_version: OKF_SCHEMA_VERSION.to_string(),
         r#type: "raw_source".to_string(),
         id: raw_id.to_string(),
         source_url: is_url(source).then(|| source.to_string()),
@@ -126,7 +125,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("---\n"));
         assert!(
-            contents.contains("okf_version: '1.0'") || contents.contains("okf_version: \"1.0\"")
+            contents.contains("okf_version: '0.2'") || contents.contains("okf_version: \"0.2\"")
         );
         assert!(contents.contains("source_url: https://example.com/docs"));
         assert!(contents.contains("tag: architecture"));

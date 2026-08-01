@@ -11,6 +11,7 @@ pub mod health_check_manager;
 pub mod log_transport;
 pub mod logger;
 pub mod mcp_server;
+pub mod okf_schema;
 pub mod otel;
 pub mod rate_limiter;
 pub mod sanitizer;

@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::core::okf_schema::OKF_SCHEMA_VERSION;
 use crate::core::vault_resolver::sandbox_path;
 use crate::manifest;
 use crate::validator::frontmatter::parse_wiki_page;
 use crate::validator::rules::markdown_files_in;
 
-const BUNDLE_OKF_VERSION: &str = "0.2";
 const BUNDLE_RELATIVE_PATH: &str = "okf.json";
 
 #[derive(Debug, Serialize)]
@@ -78,7 +78,7 @@ pub fn build_bundle(vault_root: &Path) -> anyhow::Result<Bundle> {
     concepts.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(Bundle {
-        okf_version: BUNDLE_OKF_VERSION.to_string(),
+        okf_version: OKF_SCHEMA_VERSION.to_string(),
         concepts,
         raw_sources,
     })
