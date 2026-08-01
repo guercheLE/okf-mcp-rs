@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-08-01
+
+### Fixed
+- `compile`/`rebuild`/`run` could hang forever on a stalled or never-responding LLM provider (e.g. a rate-limited/queued free-tier OpenRouter model) — `genai::Client::default()` builds its HTTP client with no request timeout at all. Now bounded to 300s per request.
+
 ## [0.4.0] - 2026-08-01
 
 ### Added
@@ -61,6 +66,7 @@ A batch of fixes and small features from real-world usage feedback: vault lifecy
 ### Added
 - Initial commit.
 
+[0.4.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/guercheLE/okf-mcp-rs/compare/v0.2.1...v0.3.0
