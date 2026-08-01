@@ -72,12 +72,24 @@ pub fn parse_model_spec(spec: &str) -> anyhow::Result<(&str, &str)> {
     })
 }
 
-/// If `env_name` isn't already set, seeds it from the OS
+/// Whether `name` is set to a real, non-blank value — `std::env::var`
+/// alone returns `Ok("")` for a var that's set but empty, which would
+/// otherwise make `seed_env_from_credential_storage` treat a stray blank
+/// env var (leftover shell export, inherited from an MCP host's spawn
+/// env, etc.) as "already configured" and silently skip the correctly
+/// saved credential.
+fn env_var_is_meaningfully_set(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// If `env_name` isn't meaningfully set, seeds it from the OS
 /// keychain/encrypted-file credential saved under account `"llm-<provider>"`
 /// by `okf-mcp setup` — so a key saved there works without the caller
 /// having to `export` it manually first.
 fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
-    if std::env::var(env_name).is_ok() {
+    if env_var_is_meaningfully_set(env_name) {
         return;
     }
     if let Ok(Some(key)) = load_credential(&format!("llm-{provider}")) {
@@ -85,7 +97,7 @@ fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
         // env vars — `compile`/`rebuild` resolve the model spec once, up
         // front, before spawning any per-source work.
         unsafe {
-            std::env::set_var(env_name, key);
+            std::env::set_var(env_name, key.trim());
         }
     }
 }
@@ -240,6 +252,34 @@ mod tests {
         assert_eq!(std::env::var("OKF_TEST_SEED_VAR").unwrap(), "already-set");
         unsafe {
             std::env::remove_var("OKF_TEST_SEED_VAR");
+        }
+    }
+
+    #[test]
+    fn env_var_is_meaningfully_set_treats_blank_and_whitespace_only_as_unset() {
+        // SAFETY: test-only env mutation; this var name is unique to this test.
+        unsafe {
+            std::env::remove_var("OKF_TEST_MEANINGFUL_VAR");
+        }
+        assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+
+        unsafe {
+            std::env::set_var("OKF_TEST_MEANINGFUL_VAR", "");
+        }
+        assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+
+        unsafe {
+            std::env::set_var("OKF_TEST_MEANINGFUL_VAR", "   ");
+        }
+        assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+
+        unsafe {
+            std::env::set_var("OKF_TEST_MEANINGFUL_VAR", "real-value");
+        }
+        assert!(env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+
+        unsafe {
+            std::env::remove_var("OKF_TEST_MEANINGFUL_VAR");
         }
     }
 }

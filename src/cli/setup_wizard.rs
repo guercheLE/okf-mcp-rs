@@ -85,7 +85,7 @@ async fn prompt_llm_provider() -> anyhow::Result<Option<(String, Option<String>)
             .prompt()
     })
     .await??;
-    Ok(Some((provider, Some(key))))
+    Ok(Some((provider, Some(key.trim().to_string()))))
 }
 
 // mcpify:versions:begin
