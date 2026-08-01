@@ -245,6 +245,18 @@ fn looks_like_model_not_found(err: &genai::Error) -> bool {
     })
 }
 
+/// `genai::Client::default()` builds its underlying `reqwest::Client` with
+/// no request timeout at all (confirmed in genai 0.6.5's
+/// `WebClient::default()`/`WebConfig::default()` — `timeout: None`), so a
+/// stalled or never-responding provider (e.g. a rate-limited/queued free
+/// OpenRouter model) hangs `compile`/`rebuild`/`run` forever with no way to
+/// distinguish "still working" from "will never return". Generous enough
+/// not to false-positive on a slow local Ollama model on constrained
+/// hardware (see `--model`'s own help text on 12B+ being "very slow"), but
+/// bounded so a stuck request eventually surfaces as a normal error instead
+/// of an indefinite hang.
+const LLM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub struct LLMCompilerDriver {
     client: Client,
 }
@@ -257,8 +269,9 @@ impl Default for LLMCompilerDriver {
 
 impl LLMCompilerDriver {
     pub fn new() -> Self {
+        let web_config = genai::WebConfig::default().with_timeout(LLM_REQUEST_TIMEOUT);
         Self {
-            client: Client::default(),
+            client: Client::builder().with_web_config(web_config).build(),
         }
     }
 
@@ -373,6 +386,20 @@ mod tests {
             "model unavailable",
         );
         assert!(!looks_like_model_not_found(&err));
+    }
+
+    #[test]
+    fn llm_compiler_driver_builds_with_a_bounded_request_timeout() {
+        // Regression guard: `genai::Client::default()` has no request
+        // timeout at all, which let a stalled/never-responding provider
+        // (e.g. a queued free-tier model) hang `compile` indefinitely.
+        // `LLMCompilerDriver::new()` must not regress to the timeout-less
+        // default — this doesn't exercise the network path (that needs a
+        // live/mock server and 5 real minutes to observe), but it pins the
+        // constant so a future refactor can't silently drop the
+        // `.with_web_config(...)` call and reintroduce the hang.
+        assert_eq!(LLM_REQUEST_TIMEOUT, std::time::Duration::from_secs(300));
+        let _driver = LLMCompilerDriver::new();
     }
 
     #[test]
