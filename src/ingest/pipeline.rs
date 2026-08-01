@@ -32,7 +32,7 @@ fn normalize_local_uri(path: &Path) -> anyhow::Result<String> {
 
 pub async fn process_ingest(
     source: &str,
-    tag: Option<&str>,
+    tags: &[String],
     vault_root: &Path,
     config: &Config,
     auth_manager: &mut AuthManager,
@@ -62,7 +62,7 @@ pub async fn process_ingest(
                 vault_root,
                 raw_id,
                 &source_uri,
-                tag,
+                tags,
                 &hash,
                 &ingested_at,
                 &content,
@@ -182,7 +182,7 @@ mod tests {
 
         let report = process_ingest(
             source.to_str().unwrap(),
-            Some("architecture"),
+            &["architecture".to_string()],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -210,7 +210,7 @@ mod tests {
 
         let first = process_ingest(
             source.to_str().unwrap(),
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -222,7 +222,7 @@ mod tests {
 
         let second = process_ingest(
             source.to_str().unwrap(),
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -243,7 +243,7 @@ mod tests {
 
         process_ingest(
             source.to_str().unwrap(),
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -255,7 +255,7 @@ mod tests {
         std::fs::write(&source, "version two").unwrap();
         let second = process_ingest(
             source.to_str().unwrap(),
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -285,7 +285,7 @@ mod tests {
 
         let result = process_ingest(
             "/does/not/exist.md",
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -304,7 +304,7 @@ mod tests {
 
         let report = process_ingest(
             source.to_str().unwrap(),
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),
@@ -338,7 +338,7 @@ mod tests {
 
         let report = process_ingest(
             source.to_str().unwrap(),
-            None,
+            &[],
             vault.path(),
             &config(),
             &mut auth_manager(),

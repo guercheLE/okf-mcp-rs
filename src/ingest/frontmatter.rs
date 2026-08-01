@@ -17,8 +17,11 @@ pub struct RawFrontmatter {
     pub source_url: Option<String>,
     pub checksum: String,
     pub ingested_at: String,
-    #[serde(default)]
-    pub tag: Option<String>,
+    /// Omitted from the written YAML entirely when empty, rather than
+    /// serialized as `tags: []` — matches the existing "absent, not an
+    /// empty placeholder" convention `source_url: null` already sets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// `sha256:<hex>`, matching the checksum format used throughout the
@@ -49,11 +52,19 @@ pub fn is_url(source: &str) -> bool {
 /// content-addressed and never overwritten in place — the manifest (not
 /// this function) decides whether a write is even needed (see
 /// `manifest::model::Manifest::record_ingest`'s no-op case).
+///
+/// `source` is always already a normalized URI by the time it reaches
+/// here — either a real `http(s)://` URL, or (for local files) the
+/// `file://<canonical absolute path>` string `ingest::pipeline::
+/// normalize_local_uri` already computes and uses as the manifest key —
+/// so `source_url` is populated unconditionally, verbatim, rather than
+/// only for `http(s)://` sources: one identifier, not two that could
+/// silently diverge.
 pub fn write_raw_blob(
     vault_root: &Path,
     raw_id: &str,
     source: &str,
-    tag: Option<&str>,
+    tags: &[String],
     checksum: &str,
     ingested_at: &str,
     content: &str,
@@ -62,10 +73,10 @@ pub fn write_raw_blob(
         okf_version: OKF_SCHEMA_VERSION.to_string(),
         r#type: "raw_source".to_string(),
         id: raw_id.to_string(),
-        source_url: is_url(source).then(|| source.to_string()),
+        source_url: Some(source.to_string()),
         checksum: checksum.to_string(),
         ingested_at: ingested_at.to_string(),
-        tag: tag.map(str::to_string),
+        tags: tags.to_vec(),
     };
 
     let yaml = serde_yaml::to_string(&frontmatter)?;
@@ -115,7 +126,7 @@ mod tests {
             vault.path(),
             "raw_aaa",
             "https://example.com/docs",
-            Some("architecture"),
+            &["architecture".to_string()],
             "sha256:aaa",
             "2026-07-30T18:50:00Z",
             "# Hello\n\nBody text.",
@@ -128,29 +139,82 @@ mod tests {
             contents.contains("okf_version: '0.2'") || contents.contains("okf_version: \"0.2\"")
         );
         assert!(contents.contains("source_url: https://example.com/docs"));
-        assert!(contents.contains("tag: architecture"));
+        assert!(contents.contains("tags:"));
+        assert!(contents.contains("- architecture"));
         assert!(contents.ends_with("# Hello\n\nBody text."));
     }
 
     #[test]
-    fn write_raw_blob_leaves_source_url_null_for_local_files() {
+    fn write_raw_blob_writes_multiple_tags_as_a_list() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let path = write_raw_blob(
+            vault.path(),
+            "raw_ccc",
+            "https://example.com/docs",
+            &[
+                "github".to_string(),
+                "repository".to_string(),
+                "mcpify".to_string(),
+            ],
+            "sha256:ccc",
+            "t0",
+            "content",
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: RawFrontmatter = serde_yaml::from_str(
+            contents
+                .trim_start_matches("---\n")
+                .split("---")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.tags, vec!["github", "repository", "mcpify"]);
+    }
+
+    #[test]
+    fn write_raw_blob_omits_tags_entirely_when_none_given() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let path = write_raw_blob(
+            vault.path(),
+            "raw_ddd",
+            "https://example.com/docs",
+            &[],
+            "sha256:ddd",
+            "t0",
+            "content",
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(!contents.contains("tags:"));
+    }
+
+    #[test]
+    fn write_raw_blob_populates_source_url_for_local_file_uris_too() {
+        // `source` here is exactly the form `ingest::pipeline::
+        // normalize_local_uri` produces and uses as the manifest key —
+        // source_url should match it verbatim, not stay null.
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
 
         let path = write_raw_blob(
             vault.path(),
             "raw_bbb",
-            "/local/legacy.md",
-            None,
+            "file:///local/legacy.md",
+            &[],
             "sha256:bbb",
             "t0",
             "content",
         )
         .unwrap();
         let frontmatter_yaml = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            frontmatter_yaml.contains("source_url: null")
-                || frontmatter_yaml.contains("source_url: ~")
-        );
+        assert!(frontmatter_yaml.contains("source_url: file:///local/legacy.md"));
     }
 }

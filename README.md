@@ -72,14 +72,14 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 
 | Command | Args | Description |
 | --- | --- | --- |
-| `ingest` | `<URL\|FILE> [--tag]` | Fetch a URL (via Firecrawl) or read a local file and add it to the vault's raw sources |
+| `ingest` | `<URL\|FILE> [--tag <tag>]...` | Fetch a URL (via Firecrawl) or read a local file and add it to the vault's raw sources; `--tag` is repeatable |
 | `compile` | `[--model] [--diff]` | Compile newly-ingested raw sources into wiki concept pages |
 | `rebuild` | `[--model] [--force]` | Recompile the wiki from all active raw sources |
 | `lint` | `[--strict] [--json]` | Check wikilinks, frontmatter, and source provenance in the wiki |
 | `reindex` | `[--embeddings]` | Rebuild the local text and vector index used by search |
 | `search` | `<query> [-l/--limit] [--json] [--all-vaults]` | Search ingested raw sources and compiled wiki concepts |
 | `delete` | `<URL\|FILE> [--purge]` | Remove a source from the vault (soft by default; `--purge` hard-deletes) |
-| `run` | `<URL\|FILE> [--tag] [--model]` | Ingest, compile, lint, and commit as one step |
+| `run` | `<URL\|FILE> [--tag <tag>]... [--model]` | Ingest, compile, lint, and commit as one step; `--tag` is repeatable |
 | `vault list` / `add` / `create` / `remove` (`rm`) / `delete` / `default` | — | Manage vaults / knowledge bases — also reachable as `kb ...` |
 | `setup` | — | Configure the Firecrawl API key and an LLM provider key |
 | `test-connection` | — | Verify Firecrawl is reachable and report which LLM providers are configured |
@@ -93,7 +93,7 @@ Every content-touching subcommand also accepts the global `--vault <name|path>` 
 
 | Tool | Args | Description |
 | --- | --- | --- |
-| `okf-ingest` | `source, tag?, vault?` | Fetch a URL or read a local file and add it to the vault's raw sources |
+| `okf-ingest` | `source, tags?, vault?` | Fetch a URL or read a local file and add it to the vault's raw sources |
 | `okf-compile` | `diff?, model?, temperature?, base_url_override?, vault?` | Compile newly-ingested raw sources into wiki concept pages |
 | `okf-rebuild` | `force?, model?, temperature?, base_url_override?, vault?` | Recompile the wiki from all active raw sources |
 | `okf-lint` | `strict?, vault?` | Check wikilinks, frontmatter, and source provenance in the wiki |

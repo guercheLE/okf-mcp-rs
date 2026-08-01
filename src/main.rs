@@ -53,8 +53,9 @@ enum Command {
     /// vault's raw sources
     Ingest {
         source: String,
+        /// Repeatable: --tag github --tag repository --tag mcpify
         #[arg(long)]
-        tag: Option<String>,
+        tag: Vec<String>,
     },
     /// Compile newly-ingested raw sources into wiki concept pages
     Compile {
@@ -111,8 +112,9 @@ enum Command {
     /// Ingest, compile, lint, and commit a source as one step
     Run {
         source: String,
+        /// Repeatable: --tag github --tag repository --tag mcpify
         #[arg(long)]
-        tag: Option<String>,
+        tag: Vec<String>,
         /// "<provider>/<model_name>" — see `compile --help` for model-size guidance
         #[arg(long)]
         model: Option<String>,
@@ -255,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
 
     let result = match cli.command {
         Command::Setup => cli::setup::run().await,
-        Command::Ingest { source, tag } => cli::ingest::run(&source, tag.as_deref(), vault).await,
+        Command::Ingest { source, tag } => cli::ingest::run(&source, &tag, vault).await,
         Command::Compile { model, diff } => cli::compile::run(model.as_deref(), diff, vault).await,
         Command::Rebuild { model, force } => {
             cli::rebuild::run(model.as_deref(), force, vault).await
@@ -270,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
         } => cli::search::run(&query, limit, json, all_vaults, vault),
         Command::Delete { source, purge } => cli::delete::run(&source, purge, vault),
         Command::Run { source, tag, model } => {
-            cli::run::run(&source, tag.as_deref(), model.as_deref(), vault).await
+            cli::run::run(&source, &tag, model.as_deref(), vault).await
         }
         Command::Vault(VaultCommand::List) => cli::vault::list(),
         Command::Vault(VaultCommand::Add {

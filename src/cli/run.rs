@@ -11,7 +11,7 @@ use super::compile::report_and_commit;
 
 pub async fn run(
     source: &str,
-    tag: Option<&str>,
+    tags: &[String],
     model: Option<&str>,
     vault: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -22,7 +22,7 @@ pub async fn run(
 
     output.line(&format!("Fetching '{source}'..."));
     let ingest_report =
-        process_ingest(source, tag, &vault_root, &config, &mut auth_manager, None).await?;
+        process_ingest(source, tags, &vault_root, &config, &mut auth_manager, None).await?;
     output.line(&format!(
         "Ingested '{}' ({:?}).",
         ingest_report.source_uri, ingest_report.outcome

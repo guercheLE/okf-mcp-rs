@@ -8,14 +8,15 @@ use okf_mcp::core::vault_resolver::resolve_vault;
 use okf_mcp::ingest::process_ingest;
 use okf_mcp::manifest::IngestOutcome;
 
-pub async fn run(source: &str, tag: Option<&str>, vault: Option<&str>) -> anyhow::Result<()> {
+pub async fn run(source: &str, tags: &[String], vault: Option<&str>) -> anyhow::Result<()> {
     let vault_root = resolve_vault(vault)?;
     let config = load_config(serde_json::Map::new())?;
     let mut auth_manager = AuthManager::new(config.auth_method);
     let output = Output::cli();
 
     output.line(&format!("Fetching '{source}'..."));
-    let report = process_ingest(source, tag, &vault_root, &config, &mut auth_manager, None).await?;
+    let report =
+        process_ingest(source, tags, &vault_root, &config, &mut auth_manager, None).await?;
 
     match &report.outcome {
         IngestOutcome::NoOp => {

@@ -45,8 +45,9 @@ use crate::validator::{self, report as lint_report_format};
 pub struct IngestArgs {
     /// URL to fetch (via Firecrawl) or local file path to read
     pub source: String,
+    /// Repeatable in effect: pass a list of tags to attach
     #[serde(default)]
-    pub tag: Option<String>,
+    pub tags: Vec<String>,
     /// Vault name (from the registry) or path; defaults to the active context
     #[serde(default)]
     pub vault: Option<String>,
@@ -197,7 +198,7 @@ impl OkfServer {
             let mut auth_manager = auth_manager.lock().await;
             let report = ingest::process_ingest(
                 &args.source,
-                args.tag.as_deref(),
+                &args.tags,
                 &vault_root,
                 &config,
                 &mut auth_manager,
