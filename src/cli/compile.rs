@@ -24,6 +24,18 @@ pub async fn run(model: Option<&str>, diff: bool, vault: Option<&str>) -> anyhow
 
 /// Shared by `cli::rebuild` — same "print outcome, write the bundle, commit
 /// touched paths" tail for both commands.
+///
+/// If any source failed or lint reports errors, this returns `Err` *before*
+/// writing `okf.json` or committing anything — a partial/broken run's
+/// inconsistent wiki state must never land in `okf.json` or git history.
+/// `./raw/` blobs and each source's own manifest ingest-history/
+/// `compiled_hash` entry are untouched either way: those are written
+/// during `ingest`/per-source in `compiler::compile`, entirely outside
+/// this function, and `manifest.json` is never part of the git-staged
+/// path list below — so a source that itself succeeded within an
+/// otherwise-failed run stays resumable on the next `compile` (see
+/// `select_sources`), it just doesn't get bundled/committed until a
+/// subsequent clean run.
 pub(crate) fn report_and_commit(
     vault_root: &std::path::Path,
     report: &okf_mcp::compiler::CompileReport,
@@ -44,6 +56,14 @@ pub(crate) fn report_and_commit(
             "{}",
             okf_mcp::validator::report::to_text(&report.lint_report)
         );
+    }
+
+    if report.sources_failed() > 0 || report.lint_report.has_errors() {
+        eprintln!(
+            "{} source(s) failed / lint found errors — not committing; fix and re-run compile.",
+            report.sources_failed()
+        );
+        anyhow::bail!("compile finished with errors");
     }
 
     let bundle_path = bundle::write_bundle(vault_root)?;
@@ -75,8 +95,106 @@ pub(crate) fn report_and_commit(
         }
     }
 
-    if report.sources_failed() > 0 || report.lint_report.has_errors() {
-        anyhow::bail!("compile finished with errors");
-    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use okf_mcp::compiler::CompileReport;
+
+    use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    }
+
+    fn init_repo(dir: &Path) {
+        assert!(run_git(dir, &["init", "--quiet"]).status.success());
+        assert!(
+            run_git(dir, &["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(
+            run_git(dir, &["config", "user.name", "Test"])
+                .status
+                .success()
+        );
+    }
+
+    fn failing_report() -> CompileReport {
+        CompileReport {
+            sources: vec![okf_mcp::compiler::driver::SourceOutcome {
+                uri: "https://example.com/a".to_string(),
+                raw_id: "raw_aaa".to_string(),
+                error: Some("LLM call failed".to_string()),
+            }],
+            touched_paths: Vec::new(),
+            lint_report: Default::default(),
+        }
+    }
+
+    fn clean_report() -> CompileReport {
+        CompileReport {
+            sources: vec![okf_mcp::compiler::driver::SourceOutcome {
+                uri: "https://example.com/a".to_string(),
+                raw_id: "raw_aaa".to_string(),
+                error: None,
+            }],
+            touched_paths: Vec::new(),
+            lint_report: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_failed_source_skips_the_bundle_and_the_commit() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let result = report_and_commit(vault.path(), &failing_report(), "okf-mcp compile");
+
+        assert!(result.is_err());
+        assert!(!vault.path().join("okf.json").exists());
+    }
+
+    #[test]
+    fn lint_errors_skip_the_bundle_and_the_commit_even_with_no_failed_sources() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let mut report = clean_report();
+        report.sources[0].error = None;
+        report.lint_report.broken_links =
+            vec![("wiki/concepts/a.md".to_string(), "missing".to_string())];
+
+        let result = report_and_commit(vault.path(), &report, "okf-mcp compile");
+
+        assert!(result.is_err());
+        assert!(!vault.path().join("okf.json").exists());
+    }
+
+    #[test]
+    fn a_clean_report_writes_the_bundle_and_commits() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        init_repo(vault.path());
+        // In the real `compiler::compile` flow, `regenerate_index` writes
+        // this before `report_and_commit` ever runs.
+        std::fs::create_dir_all(vault.path().join("wiki")).unwrap();
+        std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
+
+        let result = report_and_commit(vault.path(), &clean_report(), "okf-mcp compile");
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(vault.path().join("okf.json").exists());
+        let log = run_git(vault.path(), &["log", "--oneline"]);
+        assert!(!String::from_utf8_lossy(&log.stdout).trim().is_empty());
+    }
 }
