@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Blocks a commit if it wouldn't pass CI's first two gates. Enable with:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-commit: cargo fmt --check"
+if ! cargo fmt --check; then
+    echo "pre-commit: formatting is out of date — run 'cargo fmt' and re-stage" >&2
+    exit 1
+fi
+
+echo "pre-commit: cargo clippy --all-targets -- -D warnings"
+if ! cargo clippy --all-targets -- -D warnings; then
+    echo "pre-commit: clippy found warnings — fix them and re-stage" >&2
+    exit 1
+fi
+
+echo "pre-commit: OK"

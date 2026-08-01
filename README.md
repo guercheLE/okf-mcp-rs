@@ -218,6 +218,14 @@ Outbound Firecrawl calls (`services/api_client.rs`) pass through a rate limiter,
 cargo test
 ```
 
+### Pre-commit hook
+
+A checked-in hook runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` before each commit — the same two gates CI checks first — so formatting/lint drift never reaches a commit in the first place. Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Coverage
 
 ```bash
