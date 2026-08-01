@@ -343,6 +343,10 @@ pub async fn run_setup_wizard() -> anyhow::Result<()> {
     {
         save_credential(&format!("llm-{provider}"), &key)?;
         println!("Saved {provider} API key.");
+        println!(
+            "Saved to your OS keychain (or the encrypted-file fallback) — independent of the \
+             persistence choice below, which only applies to Firecrawl settings."
+        );
     }
 
     let (env, config_fields) =
