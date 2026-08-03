@@ -61,12 +61,15 @@ fn parse_env_value(config_key: &str, value: &str) -> Value {
 /// `Config` field it maps to. Exposed for `cli::config`'s layered display,
 /// which needs exactly this — "which env vars are actually set" — not
 /// just the fully-merged/defaulted result `load_config` returns.
+///
+/// No entry exists for `auth_method`: `AuthMethod` has exactly one variant
+/// (`Pat`), which `Config`'s own serde default already resolves to — there
+/// is nothing an env var could meaningfully override, so none is read.
 pub fn env_overrides() -> Map<String, Value> {
     let mut overrides = Map::new();
     for (config_key, env_suffix) in [
         ("url", "URL"),
-        ("firecrawl_base_url", "FIRECRAWL_BASE_URL"),
-        ("auth_method", "AUTH_METHOD"),
+        ("firecrawl_base_url", "FIRECRAWL_API_URL"),
         ("api_version", "API_VERSION"),
         ("log_level", "LOG_LEVEL"),
         ("transport", "TRANSPORT"),
@@ -81,6 +84,53 @@ pub fn env_overrides() -> Map<String, Value> {
         if let Ok(value) = std::env::var(format!("{ENV_PREFIX}_{env_suffix}")) {
             overrides.insert(config_key.to_string(), parse_env_value(config_key, &value));
         }
+    }
+    overrides.extend(custom_provider_env_overrides());
+    overrides
+}
+
+const CUSTOM_PROVIDER_ENV_PREFIX: &str = "OKF_MCP_CUSTOM_PROVIDER_";
+const CUSTOM_PROVIDER_ENV_SUFFIX: &str = "_BASE_URL";
+
+/// Env var name for a named custom LLM provider's base URL, e.g.
+/// `OKF_MCP_CUSTOM_PROVIDER_MYVLLM_BASE_URL` for a provider named
+/// `"myvllm"` — the single source of truth for this format, shared by
+/// `setup_wizard.rs`'s writer and `custom_provider_env_overrides`'s reader
+/// below so they can never drift.
+pub fn custom_provider_base_url_env_name(name: &str) -> String {
+    let sanitized: String = name
+        .to_uppercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{CUSTOM_PROVIDER_ENV_PREFIX}{sanitized}{CUSTOM_PROVIDER_ENV_SUFFIX}")
+}
+
+/// `OKF_MCP_CUSTOM_PROVIDER_<NAME>_BASE_URL` env vars, written by
+/// `okf-mcp setup` when a custom provider's name+endpoint is persisted via
+/// `.env` — folded into `env_overrides()`'s result under the
+/// `custom_providers` key. Unlike the fixed fields above, provider names
+/// are open-ended, so this scans `std::env::vars()` for the shared
+/// prefix/suffix instead of a static list. The recovered name is
+/// lowercased and underscores become hyphens (best-effort reverse of
+/// `custom_provider_base_url_env_name`'s sanitization) — provider names
+/// intended to round-trip losslessly through `.env` should stick to
+/// lowercase alphanumerics/hyphens.
+fn custom_provider_env_overrides() -> Map<String, Value> {
+    let mut providers = Map::new();
+    for (key, value) in std::env::vars() {
+        if let Some(middle) = key
+            .strip_prefix(CUSTOM_PROVIDER_ENV_PREFIX)
+            .and_then(|rest| rest.strip_suffix(CUSTOM_PROVIDER_ENV_SUFFIX))
+            && !middle.is_empty()
+        {
+            let name = middle.to_lowercase().replace('_', "-");
+            providers.insert(name, serde_json::json!({ "base_url": value }));
+        }
+    }
+    let mut overrides = Map::new();
+    if !providers.is_empty() {
+        overrides.insert("custom_providers".to_string(), Value::Object(providers));
     }
     overrides
 }
@@ -195,6 +245,91 @@ mod tests {
         let path = dir.path().join("config.yml");
         std::fs::write(&path, "- just\n- a\n- list\n").unwrap();
         assert!(read_yaml_if_exists(&path).is_empty());
+    }
+
+    #[test]
+    fn env_overrides_reads_the_canonical_firecrawl_url_env_var_and_has_no_auth_method_entry() {
+        // Serialized against every other test in this crate that calls
+        // `load_config`/`env_overrides` and asserts a specific value — env
+        // vars are process-global, so an unguarded mutation here could
+        // race with e.g. `an_entirely_empty_cascade_loads_successfully_with_defaults`.
+        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: test-only env mutation, serialized by the guard above.
+        unsafe {
+            std::env::set_var(
+                "OKF_MCP_FIRECRAWL_API_URL",
+                "https://cfgmgrtest2.example/v1",
+            );
+        }
+        let overrides = env_overrides();
+        assert_eq!(
+            overrides.get("firecrawl_base_url"),
+            Some(&json!("https://cfgmgrtest2.example/v1"))
+        );
+        // No entry for auth_method at all — AuthMethod has exactly one
+        // variant, so no env var is read for it anymore.
+        assert!(!overrides.contains_key("auth_method"));
+        // SAFETY: same guard as above.
+        unsafe {
+            std::env::remove_var("OKF_MCP_FIRECRAWL_API_URL");
+        }
+    }
+
+    #[test]
+    fn custom_provider_base_url_env_name_sanitizes_non_alphanumeric_characters() {
+        assert_eq!(
+            custom_provider_base_url_env_name("myvllm"),
+            "OKF_MCP_CUSTOM_PROVIDER_MYVLLM_BASE_URL"
+        );
+        assert_eq!(
+            custom_provider_base_url_env_name("my-vllm"),
+            "OKF_MCP_CUSTOM_PROVIDER_MY_VLLM_BASE_URL"
+        );
+    }
+
+    #[test]
+    fn custom_provider_env_overrides_parses_matching_vars_and_ignores_unrelated_ones() {
+        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: test-only, uniquely-named env vars scoped to this test.
+        unsafe {
+            std::env::set_var(
+                "OKF_MCP_CUSTOM_PROVIDER_CFGMGRTEST_BASE_URL",
+                "https://cfgmgrtest.example/v1",
+            );
+            std::env::set_var("OKF_MCP_LOG_LEVEL", "debug");
+        }
+
+        let overrides = custom_provider_env_overrides();
+        let providers = overrides
+            .get("custom_providers")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            providers.get("cfgmgrtest"),
+            Some(&json!({ "base_url": "https://cfgmgrtest.example/v1" }))
+        );
+        assert!(!providers.contains_key("log_level"));
+
+        // SAFETY: same guard as above.
+        unsafe {
+            std::env::remove_var("OKF_MCP_CUSTOM_PROVIDER_CFGMGRTEST_BASE_URL");
+            std::env::remove_var("OKF_MCP_LOG_LEVEL");
+        }
+    }
+
+    #[test]
+    fn custom_provider_env_overrides_has_no_entry_for_an_unconfigured_provider() {
+        let overrides = custom_provider_env_overrides();
+        let providers = overrides
+            .get("custom_providers")
+            .and_then(|v| v.as_object());
+        if let Some(providers) = providers {
+            assert!(!providers.contains_key("never-configured-test-provider-xyz"));
+        }
     }
 
     #[test]

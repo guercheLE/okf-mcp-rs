@@ -15,23 +15,19 @@ use super::strategies::stub::StubAuthStrategy;
 // provider keys (for the compile stage) live under their own
 // "llm-<provider>" accounts instead, via `credential_storage` directly.
 const CREDENTIAL_ACCOUNT: &str = "firecrawl";
-const ENV_PREFIX: &str = "OKF_MCP";
+const FIRECRAWL_PAT_ENV: &str = "OKF_MCP_FIRECRAWL_API_PAT";
 
-/// Builds an `AuthConfig` straight from the `<PREFIX>_TOKEN`/`_API_KEY`/
-/// `_USERNAME`/`_PASSWORD` env vars documented in `.env.example`, if the
-/// vars this `auth_method` needs are actually set — closes the gap where
-/// those vars were documented but never wired into the credentials lookup,
-/// leaving a prior `setup` run (keychain/file) as the only way to
-/// authenticate. Returns `None` when the required var(s) for this
-/// deployment's `auth_method` aren't present, so callers fall back to the
-/// stored-credential lookup unchanged.
+/// Builds an `AuthConfig` straight from the `OKF_MCP_FIRECRAWL_API_PAT` env
+/// var documented in `.env.example`, if it's actually set — closes the gap
+/// where those vars were documented but never wired into the credentials
+/// lookup, leaving a prior `setup` run (keychain/file) as the only way to
+/// authenticate. Returns `None` when the var isn't present, so callers
+/// fall back to the stored-credential lookup unchanged.
 fn credentials_from_env(auth_method: AuthMethod) -> Option<AuthConfig> {
     let mut config = AuthConfig::new();
     match auth_method {
         AuthMethod::Pat => {
-            let token = std::env::var(format!("{ENV_PREFIX}_TOKEN"))
-                .or_else(|_| std::env::var(format!("{ENV_PREFIX}_API_KEY")))
-                .ok()?;
+            let token = std::env::var(FIRECRAWL_PAT_ENV).ok()?;
             config.insert("token".to_string(), token);
         }
         #[allow(unreachable_patterns)]
@@ -356,5 +352,34 @@ mod tests {
             headers.get("Authorization").map(String::as_str),
             Some("Bearer preformatted")
         );
+    }
+
+    #[test]
+    fn credentials_from_env_reads_the_pat_var_and_returns_none_when_unset() {
+        // Both assertions live in one test (rather than two) so they can't
+        // race against each other over the shared `FIRECRAWL_PAT_ENV`
+        // process env var — no other test in this module reaches
+        // `credentials_from_env` (they all seed cached credentials first
+        // via `set_credentials`), so nothing else touches this var.
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var(FIRECRAWL_PAT_ENV);
+        }
+        assert!(credentials_from_env(AuthMethod::Pat).is_none());
+
+        // SAFETY: same test, same var.
+        unsafe {
+            std::env::set_var(FIRECRAWL_PAT_ENV, "test-pat-value");
+        }
+        let config = credentials_from_env(AuthMethod::Pat).unwrap();
+        assert_eq!(
+            config.get("token").map(String::as_str),
+            Some("test-pat-value")
+        );
+
+        // SAFETY: same test, same var.
+        unsafe {
+            std::env::remove_var(FIRECRAWL_PAT_ENV);
+        }
     }
 }

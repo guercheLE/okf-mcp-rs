@@ -5,25 +5,37 @@
 // the operator's choice: a .env file, a local or global config.yml file,
 // or a ready-to-run CLI invocation printed to stdout (nothing written to
 // disk).
+//
+// Every secret (the Firecrawl PAT, and every LLM provider key, known or
+// custom) always lives in the OS keychain/encrypted-file fallback via
+// `save_credential` — that never changes. Separately, and only on
+// explicit per-secret opt-in, a secret's real value may also be embedded
+// in the `.env` file/printed MCP client config this wizard produces; by
+// default nothing sensitive is written or printed anywhere but the
+// keychain.
+//
+// Re-running this wizard reads whatever's already configured first:
+// non-secret fields are pre-filled as editable defaults, and secret
+// fields that already have a saved value offer a keep/overwrite choice
+// instead of unconditionally re-prompting and re-saving.
+//
 // `inquire`'s prompts are blocking — run through `spawn_blocking`, the
 // same pattern mcpify's own `auth_profile::prompt` documents for calling
 // it from an async runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use okf_mcp::compiler::provider::KNOWN_PROVIDERS;
-use okf_mcp::core::config_schema::{AuthMethod, Transport};
-use okf_mcp::core::credential_storage::save_credential;
+use okf_mcp::compiler::provider::{self, KNOWN_PROVIDERS};
+use okf_mcp::core::config_manager;
+use okf_mcp::core::config_schema::{AuthMethod, Config, CustomProviderEntry, Transport};
+use okf_mcp::core::credential_storage::{credential_exists, load_credential, save_credential};
 
-fn to_env_key(key: &str) -> String {
-    key.to_uppercase()
-}
-
-async fn prompt_base_url() -> anyhow::Result<String> {
-    let url = tokio::task::spawn_blocking(|| {
+async fn prompt_base_url(default: &str) -> anyhow::Result<String> {
+    let default = default.to_string();
+    let url = tokio::task::spawn_blocking(move || {
         inquire::Text::new("Firecrawl base URL:")
-            .with_default("https://api.firecrawl.dev")
+            .with_default(&default)
             .prompt()
     })
     .await??;
@@ -49,44 +61,84 @@ async fn prompt_auth_method() -> anyhow::Result<AuthMethod> {
     Ok(AuthMethod::Pat)
 }
 
-/// Optional: an LLM provider key for `okf-mcp compile`/`rebuild`, saved
-/// under `credential_storage` account `"llm-<provider>"` — the account
-/// `compiler::provider::seed_env_from_credential_storage` reads at compile
-/// time. `ollama` needs no key (it's the only provider prompt that can
-/// return `Some((provider, None))`).
-async fn prompt_llm_provider() -> anyhow::Result<Option<(String, Option<String>)>> {
-    let configure = tokio::task::spawn_blocking(|| {
-        inquire::Confirm::new(
-            "Configure an LLM provider now, for `okf-mcp compile`/`rebuild`? (optional)",
-        )
-        .with_default(true)
-        .prompt()
-    })
-    .await??;
-    if !configure {
-        return Ok(None);
+/// Reads whatever's already resolvable via the normal config cascade
+/// (env vars/local/global/system/install-dir files/built-in defaults —
+/// no CLI flags at this call site) to seed prompt defaults on a re-run.
+/// Falls back to `Config`'s own serde defaults (the same path
+/// `an_entirely_empty_cascade_loads_successfully_with_defaults` proves
+/// works) with a printed warning if an existing file is malformed —
+/// never hard-fails setup over a bad existing file.
+fn existing_config_or_defaults() -> Config {
+    match config_manager::load_config(serde_json::Map::new()) {
+        Ok(config) => config,
+        Err(err) => {
+            println!(
+                "warning: could not read existing configuration ({err}) — using built-in defaults"
+            );
+            serde_json::from_value(serde_json::json!({})).expect(
+                "Config is constructible from an empty map — every field has a serde default",
+            )
+        }
     }
+}
 
-    let providers = KNOWN_PROVIDERS.to_vec();
-    let provider = tokio::task::spawn_blocking(move || {
-        inquire::Select::new("LLM provider:", providers).prompt()
-    })
-    .await??
-    .to_string();
+/// Outcome of asking whether to keep an already-saved secret or replace it.
+enum SecretDecision {
+    KeepExisting,
+    New(String),
+}
 
-    if provider == "ollama" {
-        println!("ollama needs no API key (set OLLAMA_HOST later if it's not the default).");
-        return Ok(Some((provider, None)));
+/// If `account` already has a saved credential, asks (default: keep)
+/// whether to keep it — if kept, nothing is re-prompted or re-saved. If
+/// nothing is saved yet, or the operator chooses to overwrite, prompts for
+/// a new value via `Password`.
+async fn prompt_secret_decision(label: &str, account: &str) -> anyhow::Result<SecretDecision> {
+    if credential_exists(account)? {
+        let confirm_label = label.to_string();
+        let keep = tokio::task::spawn_blocking(move || {
+            inquire::Confirm::new(&format!("Keep the saved {confirm_label}?"))
+                .with_default(true)
+                .prompt()
+        })
+        .await??;
+        if keep {
+            return Ok(SecretDecision::KeepExisting);
+        }
     }
-
-    let prompt_label = provider.clone();
-    let key = tokio::task::spawn_blocking(move || {
-        inquire::Password::new(&format!("{prompt_label} API key:"))
+    let prompt_label = label.to_string();
+    let value = tokio::task::spawn_blocking(move || {
+        inquire::Password::new(&format!("{prompt_label}:"))
             .without_confirmation()
             .prompt()
     })
     .await??;
-    Ok(Some((provider, Some(key.trim().to_string()))))
+    Ok(SecretDecision::New(value))
+}
+
+/// Resolves the credential fields to use this run — either reloaded from
+/// the keychain (if the operator chose to keep the existing value) or
+/// freshly entered — plus whether a new value needs saving.
+async fn prompt_firecrawl_credentials(
+    auth_method: AuthMethod,
+) -> anyhow::Result<(HashMap<String, String>, bool)> {
+    match auth_method {
+        AuthMethod::Pat => {
+            match prompt_secret_decision("Firecrawl personal access token", "firecrawl").await? {
+                SecretDecision::KeepExisting => {
+                    let existing = load_credential("firecrawl")?.ok_or_else(|| {
+                        anyhow::anyhow!("expected an existing Firecrawl credential")
+                    })?;
+                    let credentials: HashMap<String, String> = serde_json::from_str(&existing)?;
+                    Ok((credentials, false))
+                }
+                SecretDecision::New(value) => {
+                    let mut credentials = HashMap::new();
+                    credentials.insert("token".to_string(), value);
+                    Ok((credentials, true))
+                }
+            }
+        }
+    }
 }
 
 // mcpify:versions:begin
@@ -95,13 +147,19 @@ async fn prompt_api_version() -> anyhow::Result<String> {
 }
 // mcpify:versions:end
 
-async fn prompt_transport() -> anyhow::Result<Transport> {
+async fn prompt_transport(default: Transport) -> anyhow::Result<Transport> {
     let choices = vec![
         "stdio (spawned as a subprocess by the MCP client)",
         "http (a standalone server the MCP client connects to over the network)",
     ];
+    let starting_cursor = match default {
+        Transport::Stdio => 0,
+        Transport::Http => 1,
+    };
     let selection = tokio::task::spawn_blocking(move || {
-        inquire::Select::new("Which transport will this deployment use?", choices).prompt()
+        inquire::Select::new("Which transport will this deployment use?", choices)
+            .with_starting_cursor(starting_cursor)
+            .prompt()
     })
     .await??;
 
@@ -112,38 +170,347 @@ async fn prompt_transport() -> anyhow::Result<Transport> {
     })
 }
 
-async fn prompt_credentials(auth_method: AuthMethod) -> anyhow::Result<HashMap<String, String>> {
-    match auth_method {
-        AuthMethod::Pat => {
-            tokio::task::spawn_blocking(move || -> anyhow::Result<HashMap<String, String>> {
-                let mut credentials = HashMap::new();
-                credentials.insert(
-                    "token".to_string(),
-                    inquire::Password::new("Personal access token:")
-                        .without_confirmation()
-                        .prompt()?,
-                );
-                Ok(credentials)
-            })
-            .await?
+/// The outcome of prompting for one provider's API key: `value` is `None`
+/// when the provider structurally needs no key, or the operator left the
+/// prompt blank (meaning "this one doesn't need a key" — never treated as
+/// an error). `freshly_entered` is `true` only when a new value was typed
+/// this run, so callers know whether it still needs saving.
+struct ProviderKeyResult {
+    value: Option<String>,
+    freshly_entered: bool,
+}
+
+struct KnownProviderChoice {
+    name: String,
+    key: ProviderKeyResult,
+}
+
+struct CustomProviderChoice {
+    name: String,
+    base_url: String,
+    key: ProviderKeyResult,
+}
+
+/// Prompts for one provider's API key, offering the same keep/overwrite
+/// choice as `prompt_secret_decision` when a value is already saved. A
+/// blank/whitespace-only answer means "this provider doesn't need a key"
+/// — skipped, not an error. `key_prompt_message` is only used the first
+/// time (no saved value yet), which is where a provider-specific hint
+/// (e.g. "leave blank if not needed") matters most.
+async fn prompt_provider_api_key(
+    label: &str,
+    account: &str,
+    key_prompt_message: &str,
+) -> anyhow::Result<ProviderKeyResult> {
+    if credential_exists(account)? {
+        return Ok(match prompt_secret_decision(label, account).await? {
+            SecretDecision::KeepExisting => {
+                let existing = load_credential(account)?.unwrap_or_default();
+                ProviderKeyResult {
+                    value: Some(existing),
+                    freshly_entered: false,
+                }
+            }
+            SecretDecision::New(value) => provider_key_from_input(value),
+        });
+    }
+    let message = key_prompt_message.to_string();
+    let value = tokio::task::spawn_blocking(move || {
+        inquire::Password::new(&message)
+            .without_confirmation()
+            .prompt()
+    })
+    .await??;
+    Ok(provider_key_from_input(value))
+}
+
+fn provider_key_from_input(value: String) -> ProviderKeyResult {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        ProviderKeyResult {
+            value: None,
+            freshly_entered: false,
+        }
+    } else {
+        ProviderKeyResult {
+            value: Some(trimmed),
+            freshly_entered: true,
         }
     }
 }
 
-/// Persists the non-secret config fields (`url`/`auth_method`/`api_version`/
-/// `transport`) as YAML matching exactly what `config_manager::load_config`
-/// reads back — never the credential fields, which stay in the OS
-/// keychain/encrypted-file fallback via `save_credential` (called by the
-/// caller before this runs). Writing anywhere else (a stray `.env`-only
-/// var name, `config.json`, etc.) would leave the persisted config silently
-/// ignored on every subsequent run, since `load_config`'s cascade only ever
-/// reads `./okf-mcp.config.yml` (local) or
-/// `~/.okf-mcp/config.yml` (global).
+fn save_new_key(name: &str, key: &ProviderKeyResult) -> anyhow::Result<()> {
+    if key.freshly_entered
+        && let Some(value) = &key.value
+    {
+        save_credential(&format!("llm-{name}"), value)?;
+        println!("Saved {name} API key to your OS keychain (or the encrypted-file fallback).");
+    }
+    Ok(())
+}
+
+/// Prompts for a new custom provider's name, validated against collision
+/// with `KNOWN_PROVIDERS` (including `"custom"` itself) and with any
+/// custom provider already added earlier in this same run.
+async fn prompt_custom_provider_name(
+    custom_so_far: &[CustomProviderChoice],
+) -> anyhow::Result<String> {
+    let taken: Vec<String> = KNOWN_PROVIDERS
+        .iter()
+        .map(|s| s.to_string())
+        .chain(custom_so_far.iter().map(|c| c.name.clone()))
+        .collect();
+    let name = tokio::task::spawn_blocking(move || {
+        inquire::Text::new("Custom provider name (used as <name> in --model <name>/<model>):")
+            .with_validator(move |input: &str| {
+                let input = input.trim();
+                if input.is_empty() {
+                    Ok(inquire::validator::Validation::Invalid(
+                        "name can't be empty".into(),
+                    ))
+                } else if input.contains('/') {
+                    Ok(inquire::validator::Validation::Invalid(
+                        "name can't contain '/'".into(),
+                    ))
+                } else if taken.iter().any(|t| t == input) {
+                    Ok(inquire::validator::Validation::Invalid(
+                        "name already in use".into(),
+                    ))
+                } else {
+                    Ok(inquire::validator::Validation::Valid)
+                }
+            })
+            .prompt()
+    })
+    .await??;
+    Ok(name.trim().to_string())
+}
+
+/// Optional: known-provider API keys (multi-select) plus zero, one, or
+/// many named custom providers, for `okf-mcp compile`/`rebuild`.
+/// `existing_custom_providers` (from `existing_config_or_defaults`) lets a
+/// re-run reuse a previously-configured custom provider's endpoint
+/// silently, without re-asking for it.
+async fn prompt_llm_providers(
+    existing_custom_providers: &HashMap<String, CustomProviderEntry>,
+) -> anyhow::Result<(Vec<KnownProviderChoice>, Vec<CustomProviderChoice>)> {
+    let configure = tokio::task::spawn_blocking(|| {
+        inquire::Confirm::new(
+            "Configure LLM provider(s) now, for `okf-mcp compile`/`rebuild`? (optional)",
+        )
+        .with_default(true)
+        .prompt()
+    })
+    .await??;
+    if !configure {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let known_names: Vec<&str> = KNOWN_PROVIDERS
+        .iter()
+        .copied()
+        .filter(|p| *p != "custom")
+        .collect();
+    let default_indices: Vec<usize> = known_names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| credential_exists(&format!("llm-{name}")).unwrap_or(false))
+        .map(|(index, _)| index)
+        .collect();
+
+    let selected = tokio::task::spawn_blocking(move || {
+        inquire::MultiSelect::new("Known LLM providers to configure:", known_names)
+            .with_default(&default_indices)
+            .prompt()
+    })
+    .await??;
+
+    let mut known = Vec::new();
+    for name in selected {
+        let name = name.to_string();
+        let spec = provider::provider_spec(&name)?;
+        let key = if spec.api_key_env.is_none() {
+            println!("{name} needs no API key.");
+            ProviderKeyResult {
+                value: None,
+                freshly_entered: false,
+            }
+        } else {
+            prompt_provider_api_key(&name, &format!("llm-{name}"), &format!("{name} API key:"))
+                .await?
+        };
+        known.push(KnownProviderChoice { name, key });
+    }
+
+    let mut custom = Vec::new();
+    let mut add_another = tokio::task::spawn_blocking(|| {
+        inquire::Confirm::new("Add a custom OpenAI-compatible provider (self-hosted vLLM, etc.)?")
+            .with_default(false)
+            .prompt()
+    })
+    .await??;
+    while add_another {
+        let name = prompt_custom_provider_name(&custom).await?;
+        let base_url = if let Some(entry) = existing_custom_providers.get(&name) {
+            println!("Reusing saved endpoint for {name}: {}", entry.base_url);
+            entry.base_url.clone()
+        } else {
+            let label = name.clone();
+            tokio::task::spawn_blocking(move || {
+                inquire::Text::new(&format!("Endpoint (base URL) for {label}:")).prompt()
+            })
+            .await??
+        };
+        let key = prompt_provider_api_key(
+            &name,
+            &format!("llm-{name}"),
+            "API key (if this provider does not require one, leave blank or enter anything):",
+        )
+        .await?;
+        custom.push(CustomProviderChoice {
+            name,
+            base_url,
+            key,
+        });
+
+        add_another = tokio::task::spawn_blocking(|| {
+            inquire::Confirm::new("Add another custom provider?")
+                .with_default(false)
+                .prompt()
+        })
+        .await??;
+    }
+
+    Ok((known, custom))
+}
+
+/// One secret whose real value may, on explicit per-secret opt-in, appear
+/// in the `.env` file/printed MCP client config this wizard produces —
+/// otherwise it's keychain-only.
+struct RevealableSecret {
+    label: String,
+    env_key: String,
+    value: String,
+}
+
+/// One `Confirm` per secret, default `false` — the sole gate on whether a
+/// secret's real value ever leaves the OS keychain/encrypted-file store.
+async fn prompt_secret_reveal(label: &str) -> anyhow::Result<bool> {
+    let label = label.to_string();
+    let reveal = tokio::task::spawn_blocking(move || {
+        inquire::Confirm::new(&format!(
+            "Include {label}'s real value in the MCP client config printed/saved at the end?"
+        ))
+        .with_default(false)
+        .prompt()
+    })
+    .await??;
+    Ok(reveal)
+}
+
+/// Inserts each secret's real value into `env` only if the operator opted
+/// into revealing it — everything else stays keychain-only, absent from
+/// `env` entirely.
+fn apply_reveals(
+    env: &mut HashMap<String, String>,
+    secrets: &[RevealableSecret],
+    revealed: &HashSet<String>,
+) {
+    for secret in secrets {
+        if revealed.contains(&secret.env_key) {
+            env.insert(secret.env_key.clone(), secret.value.clone());
+        }
+    }
+}
+
+/// Merges every custom provider's name+endpoint (never the API key) into
+/// `env` (as `OKF_MCP_CUSTOM_PROVIDER_<NAME>_BASE_URL`, for `.env`
+/// persistence) and `config_fields` (under `"custom_providers"`, for
+/// config.yml persistence) — not secret, no reveal gating needed.
+fn merge_custom_providers(
+    env: &mut HashMap<String, String>,
+    config_fields: &mut serde_json::Value,
+    custom: &[CustomProviderChoice],
+) {
+    if custom.is_empty() {
+        return;
+    }
+    let mut providers = serde_json::Map::new();
+    for provider in custom {
+        env.insert(
+            config_manager::custom_provider_base_url_env_name(&provider.name),
+            provider.base_url.clone(),
+        );
+        providers.insert(
+            provider.name.clone(),
+            serde_json::json!({ "base_url": provider.base_url }),
+        );
+    }
+    if let serde_json::Value::Object(map) = config_fields {
+        map.insert(
+            "custom_providers".to_string(),
+            serde_json::Value::Object(providers),
+        );
+    }
+}
+
+/// Reads an existing `.env` file's `KEY=VALUE` lines (blank/`#`-comment
+/// lines skipped) — used to merge this run's output on top instead of
+/// clobbering unrelated hand-added entries.
+fn read_dotenv_if_exists(path: &std::path::Path) -> HashMap<String, String> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            line.split_once('=')
+                .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Persists the non-secret config fields (`firecrawl_base_url`/
+/// `api_version`/`transport`/`custom_providers`) as YAML matching exactly
+/// what `config_manager::load_config` reads back — never credentials,
+/// which stay in the OS keychain/encrypted-file fallback via
+/// `save_credential`. Merges with the file's existing contents (rather
+/// than overwriting) so a hand-edited field or a previously-saved custom
+/// provider entry isn't silently dropped; `custom_providers` specifically
+/// merges by provider name rather than replacing the whole map.
 async fn write_config_yaml(
     path: &std::path::Path,
     config_fields: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    let yaml = serde_yaml::to_string(config_fields)?;
+    let mut base = config_manager::read_yaml_if_exists(path);
+
+    if let serde_json::Value::Object(new_fields) = config_fields {
+        for (key, value) in new_fields {
+            if key == "custom_providers" {
+                let mut merged_providers = match base.get("custom_providers") {
+                    Some(serde_json::Value::Object(existing)) => existing.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                if let serde_json::Value::Object(new_providers) = value {
+                    for (name, entry) in new_providers {
+                        merged_providers.insert(name.clone(), entry.clone());
+                    }
+                }
+                base.insert(
+                    "custom_providers".to_string(),
+                    serde_json::Value::Object(merged_providers),
+                );
+            } else {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    let yaml = serde_yaml::to_string(&serde_json::Value::Object(base))?;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -153,7 +520,7 @@ async fn write_config_yaml(
     println!("Wrote {}", path.display());
     println!(
         "Credentials are never written to this file — they're stored via the OS \
-         keychain/encrypted-file fallback from the credential prompt above."
+         keychain/encrypted-file fallback from the credential prompts above."
     );
     Ok(())
 }
@@ -161,6 +528,7 @@ async fn write_config_yaml(
 async fn prompt_persistence(
     env: &HashMap<String, String>,
     config_fields: &serde_json::Value,
+    secret_keys: &HashSet<String>,
 ) -> anyhow::Result<()> {
     let choices = vec![
         "Write a .env file",
@@ -173,36 +541,58 @@ async fn prompt_persistence(
     })
     .await??;
 
-    persist_selection(selection, env, config_fields).await
+    persist_selection(selection, env, config_fields, secret_keys).await
 }
 
 async fn persist_selection(
     selection: &str,
     env: &HashMap<String, String>,
     config_fields: &serde_json::Value,
+    secret_keys: &HashSet<String>,
 ) -> anyhow::Result<()> {
     let local_dir = std::env::current_dir()?;
     let global_config =
         okf_mcp::core::credential_storage::resolve_home_dir().join(".okf-mcp/config.yml");
-    persist_selection_at(selection, env, config_fields, &local_dir, &global_config).await
+    persist_selection_at(
+        selection,
+        env,
+        config_fields,
+        secret_keys,
+        &local_dir,
+        &global_config,
+    )
+    .await
 }
 
 async fn persist_selection_at(
     selection: &str,
     env: &HashMap<String, String>,
     config_fields: &serde_json::Value,
+    secret_keys: &HashSet<String>,
     local_dir: &std::path::Path,
     global_config: &std::path::Path,
 ) -> anyhow::Result<()> {
     match selection {
         "Write a .env file" => {
-            let contents = env
+            let path = local_dir.join(".env");
+            // Strip this run's secret keys first, then re-add only the
+            // ones just opted into — otherwise declining to reveal a
+            // secret on a re-run leaves a *previous* run's plaintext
+            // value stale on disk instead of removing it.
+            let mut merged = read_dotenv_if_exists(&path);
+            merged.retain(|key, _| !secret_keys.contains(key));
+            merged.extend(env.clone());
+            let contents = merged
                 .iter()
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            std::fs::write(local_dir.join(".env"), format!("{contents}\n"))?;
+            std::fs::write(&path, format!("{contents}\n"))?;
             println!("Wrote .env");
+            println!(
+                "Note: okf-mcp does not auto-load .env files — source it yourself before \
+                 running `okf-mcp start`/`http` (e.g. `set -a; source .env; set +a`)."
+            );
         }
         s if s.starts_with("Write a config.yml file (global") => {
             write_config_yaml(global_config, config_fields).await?;
@@ -211,41 +601,29 @@ async fn persist_selection_at(
             write_config_yaml(&local_dir.join("okf-mcp.config.yml"), config_fields).await?;
         }
         _ => {
-            let flags = env
+            // `okf-mcp start`/`http` take no CLI flags for these settings
+            // (only the global `--vault`) — `export`ing them is the only
+            // real, working non-file way to apply this run's settings.
+            let mut lines: Vec<String> = env
                 .iter()
-                .map(|(key, value)| {
-                    format!("--{} {:?}", key.to_lowercase().replace('_', "-"), value)
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("okf-mcp start {flags}");
+                .map(|(key, value)| format!("export {key}={value:?}"))
+                .collect();
+            lines.sort();
+            println!("{}", lines.join("\n"));
+            println!("okf-mcp start");
         }
     }
     Ok(())
 }
 
 fn build_runtime_settings(
-    url: String,
-    auth_method: AuthMethod,
-    api_version: String,
+    url: &str,
+    api_version: &str,
     transport: Transport,
-    credentials: &HashMap<String, String>,
 ) -> anyhow::Result<(HashMap<String, String>, serde_json::Value)> {
     let mut env = HashMap::new();
-    env.insert("FIRECRAWL_API_URL".to_string(), url.clone());
-    // Also written under the name the new ingest pipeline's `Config`
-    // actually reads (`firecrawl_base_url` / `OKF_MCP_FIRECRAWL_BASE_URL`),
-    // so a custom URL entered here (not just the default) takes effect for
-    // `okf-mcp ingest` too, not only the legacy `url` field above.
-    env.insert("OKF_MCP_FIRECRAWL_BASE_URL".to_string(), url);
-    env.insert(
-        "FIRECRAWL_API_AUTH_METHOD".to_string(),
-        serde_json::to_value(auth_method)?
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-    );
-    env.insert("OKF_MCP_API_VERSION".to_string(), api_version);
+    env.insert("OKF_MCP_FIRECRAWL_API_URL".to_string(), url.to_string());
+    env.insert("OKF_MCP_API_VERSION".to_string(), api_version.to_string());
     env.insert(
         "OKF_MCP_TRANSPORT".to_string(),
         serde_json::to_value(transport)?
@@ -253,14 +631,9 @@ fn build_runtime_settings(
             .unwrap_or_default()
             .to_string(),
     );
-    for (key, value) in credentials {
-        env.insert(format!("OKF_MCP_{}", to_env_key(key)), value.clone());
-    }
 
     let config_fields = serde_json::json!({
-        "url": env.get("FIRECRAWL_API_URL"),
-        "firecrawl_base_url": env.get("OKF_MCP_FIRECRAWL_BASE_URL"),
-        "auth_method": env.get("FIRECRAWL_API_AUTH_METHOD"),
+        "firecrawl_base_url": env.get("OKF_MCP_FIRECRAWL_API_URL"),
         "api_version": env.get("OKF_MCP_API_VERSION"),
         "transport": env.get("OKF_MCP_TRANSPORT"),
     });
@@ -273,9 +646,8 @@ fn build_runtime_settings(
 /// they're two different ways of running this same server and a client
 /// only ever picks one. HTTP transport shows credentials as headers only
 /// (never env/CLI args, matching `AuthManager::apply_auth_headers`'s
-/// HTTP-only-uses-per-request-credentials behavior); stdio shows both the
-/// `env` block and the equivalent all-CLI-args invocation, since the
-/// config cascade accepts either for a spawned subprocess.
+/// HTTP-only-uses-per-request-credentials behavior); stdio shows the `env`
+/// block only (no fabricated CLI-flags line — `okf-mcp start` takes none).
 fn print_mcp_client_config(
     transport: Transport,
     auth_method: AuthMethod,
@@ -294,13 +666,6 @@ fn print_mcp_client_config(
             });
             println!("\nMCP client config (stdio):");
             println!("{}", serde_json::to_string_pretty(&config).unwrap());
-
-            let cli_args = env
-                .iter()
-                .map(|(key, value)| format!("--{} {value:?}", key.to_lowercase().replace('_', "-")))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("(equivalently: `okf-mcp start {cli_args}`)");
         }
         Transport::Http => {
             let (_, header_name) = okf_mcp::auth::auth_manager::header_location_for(auth_method);
@@ -331,29 +696,76 @@ fn print_mcp_client_config(
 }
 
 pub async fn run_setup_wizard() -> anyhow::Result<()> {
-    let url = prompt_base_url().await?;
+    let existing = existing_config_or_defaults();
+
+    let url = prompt_base_url(&existing.firecrawl_base_url).await?;
     let auth_method = prompt_auth_method().await?;
-    let credentials = prompt_credentials(auth_method).await?;
+    let (credentials, firecrawl_freshly_entered) =
+        prompt_firecrawl_credentials(auth_method).await?;
     let api_version = prompt_api_version().await?;
-    let transport = prompt_transport().await?;
+    let transport = prompt_transport(existing.transport).await?;
 
-    save_credential("firecrawl", &serde_json::to_string(&credentials)?)?;
-
-    if let Some((provider, key)) = prompt_llm_provider().await?
-        && let Some(key) = key
-    {
-        save_credential(&format!("llm-{provider}"), &key)?;
-        println!("Saved {provider} API key.");
+    if firecrawl_freshly_entered {
+        save_credential("firecrawl", &serde_json::to_string(&credentials)?)?;
         println!(
-            "Saved to your OS keychain (or the encrypted-file fallback) — independent of the \
-             persistence choice below, which only applies to Firecrawl settings."
+            "Saved Firecrawl credentials to your OS keychain (or the encrypted-file fallback)."
         );
     }
 
-    let (env, config_fields) =
-        build_runtime_settings(url, auth_method, api_version, transport, &credentials)?;
+    let (known_providers, custom_providers) =
+        prompt_llm_providers(&existing.custom_providers).await?;
 
-    prompt_persistence(&env, &config_fields).await?;
+    for provider in &known_providers {
+        save_new_key(&provider.name, &provider.key)?;
+    }
+    for provider in &custom_providers {
+        save_new_key(&provider.name, &provider.key)?;
+    }
+
+    let mut secrets = Vec::new();
+    if let Some(token) = credentials.get("token") {
+        secrets.push(RevealableSecret {
+            label: "the Firecrawl personal access token".to_string(),
+            env_key: "OKF_MCP_FIRECRAWL_API_PAT".to_string(),
+            value: token.clone(),
+        });
+    }
+    for provider in &known_providers {
+        if let Some(value) = &provider.key.value {
+            let env_key = okf_mcp::compiler::provider::provider_spec(&provider.name)?
+                .api_key_env
+                .expect("a known provider with a resolved key must declare an api_key_env")
+                .to_string();
+            secrets.push(RevealableSecret {
+                label: format!("the {} API key", provider.name),
+                env_key,
+                value: value.clone(),
+            });
+        }
+    }
+    for provider in &custom_providers {
+        if let Some(value) = &provider.key.value {
+            secrets.push(RevealableSecret {
+                label: format!("the {} API key", provider.name),
+                env_key: okf_mcp::compiler::provider::synthetic_api_key_env_name(&provider.name),
+                value: value.clone(),
+            });
+        }
+    }
+
+    let mut revealed = HashSet::new();
+    for secret in &secrets {
+        if prompt_secret_reveal(&secret.label).await? {
+            revealed.insert(secret.env_key.clone());
+        }
+    }
+
+    let (mut env, mut config_fields) = build_runtime_settings(&url, &api_version, transport)?;
+    merge_custom_providers(&mut env, &mut config_fields, &custom_providers);
+    apply_reveals(&mut env, &secrets, &revealed);
+
+    let secret_keys: HashSet<String> = secrets.iter().map(|s| s.env_key.clone()).collect();
+    prompt_persistence(&env, &config_fields, &secret_keys).await?;
     print_mcp_client_config(transport, auth_method, &env);
 
     let run_command = match transport {
@@ -369,52 +781,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_settings_keep_config_fields_and_filter_ephemeral_oauth_values() {
-        let credentials = HashMap::from([
-            ("client_id".to_string(), "client".to_string()),
-            ("authorization_code".to_string(), "spent-code".to_string()),
-        ]);
-        let (env, config) = build_runtime_settings(
-            "https://api.example/v1".to_string(),
-            AuthMethod::Pat,
-            "default".to_string(),
-            Transport::Stdio,
-            &credentials,
-        )
-        .unwrap();
+    fn runtime_settings_use_the_canonical_firecrawl_env_var_names() {
+        let (env, config) =
+            build_runtime_settings("https://api.example/v1", "default", Transport::Stdio).unwrap();
 
-        assert_eq!(config["url"], "https://api.example/v1");
+        assert_eq!(env["OKF_MCP_FIRECRAWL_API_URL"], "https://api.example/v1");
+        assert_eq!(env["OKF_MCP_API_VERSION"], "default");
+        assert_eq!(env["OKF_MCP_TRANSPORT"], "stdio");
         assert_eq!(config["firecrawl_base_url"], "https://api.example/v1");
         assert_eq!(config["transport"], "stdio");
-        assert_eq!(env["OKF_MCP_CLIENT_ID"], "client");
-        assert_eq!(env["OKF_MCP_AUTHORIZATION_CODE"], "spent-code");
+        // No auth_method or legacy `url` field — dropped entirely, since
+        // AuthMethod has exactly one variant and `url` is unread legacy.
+        assert!(config.get("auth_method").is_none());
+        assert!(config.get("url").is_none());
+    }
+
+    #[test]
+    fn apply_reveals_includes_only_opted_in_secrets() {
+        let secrets = vec![
+            RevealableSecret {
+                label: "a".to_string(),
+                env_key: "SECRET_A".to_string(),
+                value: "value-a".to_string(),
+            },
+            RevealableSecret {
+                label: "b".to_string(),
+                env_key: "SECRET_B".to_string(),
+                value: "value-b".to_string(),
+            },
+        ];
+        let mut revealed = HashSet::new();
+        revealed.insert("SECRET_A".to_string());
+
+        let mut env = HashMap::new();
+        apply_reveals(&mut env, &secrets, &revealed);
+
+        assert_eq!(env.get("SECRET_A"), Some(&"value-a".to_string()));
+        assert_eq!(env.get("SECRET_B"), None);
     }
 
     #[tokio::test]
     async fn noninteractive_output_paths_cover_both_transports() {
-        let credentials = HashMap::new();
-        let (env, config) = build_runtime_settings(
-            "https://api.example/v1".to_string(),
-            // Not `prompt_auth_method().await.unwrap()`/`prompt_api_version().await.unwrap()`:
-            // this test exercises the *non*-interactive output paths
-            // (`persist_selection`/`print_mcp_client_config`), but those
-            // prompt functions are only non-interactive themselves when
-            // there's exactly one choice to make -- with more than one
-            // auth method or API version they call `inquire::Select`,
-            // which needs a real TTY and panics with "The input device is
-            // not a TTY" in CI. Constructing the values directly (matching
-            // what `print_mcp_client_config` below already hardcodes)
-            // keeps this test TTY-independent regardless of how many
-            // schemes/versions the spec declares.
-            AuthMethod::Pat,
-            "default".to_string(),
-            Transport::Http,
-            &credentials,
+        let (env, config) =
+            build_runtime_settings("https://api.example/v1", "default", Transport::Http).unwrap();
+        persist_selection(
+            "Print a ready-to-run CLI invocation",
+            &env,
+            &config,
+            &HashSet::new(),
         )
+        .await
         .unwrap();
-        persist_selection("Print a ready-to-run CLI invocation", &env, &config)
-            .await
-            .unwrap();
         print_mcp_client_config(Transport::Stdio, AuthMethod::Pat, &env);
         print_mcp_client_config(Transport::Http, AuthMethod::Pat, &env);
     }
@@ -426,19 +843,13 @@ mod tests {
         let global_config = dir.path().join("global/config.yml");
         std::fs::create_dir_all(&local_dir).unwrap();
 
-        let credentials = HashMap::new();
-        let (env, config) = build_runtime_settings(
-            "https://api.example/v1".to_string(),
-            AuthMethod::Pat,
-            "default".to_string(),
-            Transport::Stdio,
-            &credentials,
-        )
-        .unwrap();
+        let (env, config) =
+            build_runtime_settings("https://api.example/v1", "default", Transport::Stdio).unwrap();
         persist_selection_at(
             "Write a .env file",
             &env,
             &config,
+            &HashSet::new(),
             &local_dir,
             &global_config,
         )
@@ -448,6 +859,7 @@ mod tests {
             "Write a config.yml file (local — ./okf-mcp.config.yml, read only from this directory)",
             &env,
             &config,
+            &HashSet::new(),
             &local_dir,
             &global_config,
         )
@@ -457,6 +869,7 @@ mod tests {
             "Write a config.yml file (global — ~/.okf-mcp/config.yml, read on every invocation on this machine)",
             &env,
             &config,
+            &HashSet::new(),
             &local_dir,
             &global_config,
         )
@@ -466,5 +879,75 @@ mod tests {
         assert!(local_dir.join(".env").is_file());
         assert!(local_dir.join("okf-mcp.config.yml").is_file());
         assert!(global_config.is_file());
+    }
+
+    #[tokio::test]
+    async fn env_persistence_scrubs_a_stale_secret_when_this_run_declines_to_reveal_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_dir = dir.path().join("local");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        let global_config = dir.path().join("global/config.yml");
+
+        // A previous run revealed the secret into .env.
+        std::fs::write(
+            local_dir.join(".env"),
+            "OKF_MCP_FIRECRAWL_API_PAT=old-secret-value\nOKF_MCP_TRANSPORT=stdio\n",
+        )
+        .unwrap();
+
+        let (env, config) =
+            build_runtime_settings("https://api.example/v1", "default", Transport::Stdio).unwrap();
+        let mut secret_keys = HashSet::new();
+        secret_keys.insert("OKF_MCP_FIRECRAWL_API_PAT".to_string());
+
+        persist_selection_at(
+            "Write a .env file",
+            &env,
+            &config,
+            &secret_keys,
+            &local_dir,
+            &global_config,
+        )
+        .await
+        .unwrap();
+
+        let contents = std::fs::read_to_string(local_dir.join(".env")).unwrap();
+        assert!(!contents.contains("old-secret-value"));
+        assert!(!contents.contains("OKF_MCP_FIRECRAWL_API_PAT"));
+        assert!(contents.contains("OKF_MCP_TRANSPORT=stdio"));
+    }
+
+    #[tokio::test]
+    async fn config_yaml_persistence_merges_with_an_existing_file_instead_of_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("okf-mcp.config.yml");
+        std::fs::write(
+            &path,
+            "log_level: debug\ncustom_providers:\n  existing-provider:\n    base_url: https://existing.example/v1\n",
+        )
+        .unwrap();
+
+        let mut env = HashMap::new();
+        let mut config_fields = serde_json::json!({
+            "firecrawl_base_url": "https://api.example/v1",
+            "transport": "stdio",
+        });
+        let custom = vec![CustomProviderChoice {
+            name: "new-provider".to_string(),
+            base_url: "https://new.example/v1".to_string(),
+            key: ProviderKeyResult {
+                value: None,
+                freshly_entered: false,
+            },
+        }];
+        merge_custom_providers(&mut env, &mut config_fields, &custom);
+
+        write_config_yaml(&path, &config_fields).await.unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("log_level: debug"));
+        assert!(contents.contains("existing-provider"));
+        assert!(contents.contains("new-provider"));
+        assert!(contents.contains("transport: stdio"));
     }
 }

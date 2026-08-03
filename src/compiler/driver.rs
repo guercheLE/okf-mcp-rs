@@ -82,16 +82,40 @@ pub fn vault_provider_options(
 /// callers (e.g. `okf-mcp models <provider>`) that don't have a model name
 /// on hand yet, since listing available models is exactly how a user picks
 /// one.
+///
+/// Falls back to the process-level `custom_providers` map (populated by
+/// `okf-mcp setup`'s `.env`/config.yml persistence — see
+/// `config_manager::env_overrides`/`Config::custom_providers`) when the
+/// vault's own `.okf/config.toml` has no matching `[providers.<name>]`
+/// entry — vault-level config stays higher precedence (more specific),
+/// matching this codebase's existing CLI > env > local > global pattern.
 pub fn vault_provider_options_for_provider(
     vault_root: &Path,
     provider: &str,
 ) -> anyhow::Result<CompileOptions> {
     let vault_config = load_vault_config(vault_root)?;
     let provider_config = vault_config.providers.get(provider);
+
+    let mut base_url_override = provider_config.and_then(|p| p.base_url.clone());
+    let api_key_env_override = provider_config.and_then(|p| p.api_key_env.clone());
+
+    if base_url_override.is_none() {
+        // Lenient: a malformed process config.yml shouldn't block a
+        // resolution that's otherwise fully specified by the vault.
+        base_url_override = crate::core::config_manager::load_config(serde_json::Map::new())
+            .ok()
+            .and_then(|config| {
+                config
+                    .custom_providers
+                    .get(provider)
+                    .map(|e| e.base_url.clone())
+            });
+    }
+
     Ok(CompileOptions {
         temperature: None,
-        base_url_override: provider_config.and_then(|p| p.base_url.clone()),
-        api_key_env_override: provider_config.and_then(|p| p.api_key_env.clone()),
+        base_url_override,
+        api_key_env_override,
     })
 }
 
@@ -371,6 +395,33 @@ pub async fn compile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::credential_storage::HOME_ENV_TEST_LOCK;
+
+    /// Runs `f` with `HOME` redirected to a fresh temp dir, so
+    /// `vault_provider_options_for_provider`'s process-level
+    /// `custom_providers` fallback (which reads `~/.okf-mcp/config.yml`)
+    /// can't pick up whatever real global config happens to exist on the
+    /// machine running these tests. Serialized via the same
+    /// `HOME_ENV_TEST_LOCK` `config_manager.rs`'s and
+    /// `credential_storage.rs`'s own `HOME`-mutating tests already share.
+    fn with_isolated_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _guard = HOME_ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: test-only env mutation, serialized by HOME_ENV_TEST_LOCK.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+        let result = f(dir.path());
+        // SAFETY: same guard as above.
+        unsafe {
+            match prev_home {
+                Some(prev) => std::env::set_var("HOME", prev),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        result
+    }
 
     #[test]
     fn resolve_model_spec_prefers_the_explicit_flag() {
@@ -423,25 +474,79 @@ mod tests {
 
     #[test]
     fn vault_provider_options_is_empty_for_a_provider_with_no_matching_entry() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        std::fs::write(
-            vault.path().join(".okf/config.toml"),
-            "[providers.custom]\napi_key_env = \"MY_CUSTOM_KEY\"\n",
-        )
-        .unwrap();
+        with_isolated_home(|_home| {
+            let vault = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+            std::fs::write(
+                vault.path().join(".okf/config.toml"),
+                "[providers.custom]\napi_key_env = \"MY_CUSTOM_KEY\"\n",
+            )
+            .unwrap();
 
-        let options = vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
-        assert_eq!(options.base_url_override, None);
-        assert_eq!(options.api_key_env_override, None);
+            let options =
+                vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
+            assert_eq!(options.base_url_override, None);
+            assert_eq!(options.api_key_env_override, None);
+        });
     }
 
     #[test]
     fn vault_provider_options_is_empty_for_a_vault_with_no_config_at_all() {
-        let vault = tempfile::tempdir().unwrap();
-        let options = vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
-        assert_eq!(options.base_url_override, None);
-        assert_eq!(options.api_key_env_override, None);
+        with_isolated_home(|_home| {
+            let vault = tempfile::tempdir().unwrap();
+            let options =
+                vault_provider_options(vault.path(), "anthropic/claude-3-5-sonnet").unwrap();
+            assert_eq!(options.base_url_override, None);
+            assert_eq!(options.api_key_env_override, None);
+        });
+    }
+
+    #[test]
+    fn vault_provider_options_for_provider_falls_back_to_the_process_level_custom_providers_map() {
+        with_isolated_home(|home| {
+            std::fs::create_dir_all(home.join(".okf-mcp")).unwrap();
+            std::fs::write(
+                home.join(".okf-mcp/config.yml"),
+                "custom_providers:\n  myvllm:\n    base_url: https://global.example/v1\n",
+            )
+            .unwrap();
+
+            // A vault with no `.okf/config.toml` at all — nothing to
+            // shadow the process-level fallback.
+            let vault = tempfile::tempdir().unwrap();
+            let options = vault_provider_options_for_provider(vault.path(), "myvllm").unwrap();
+            assert_eq!(
+                options.base_url_override.as_deref(),
+                Some("https://global.example/v1")
+            );
+        });
+    }
+
+    #[test]
+    fn vault_provider_options_for_provider_prefers_the_vault_entry_over_the_process_level_fallback()
+    {
+        with_isolated_home(|home| {
+            std::fs::create_dir_all(home.join(".okf-mcp")).unwrap();
+            std::fs::write(
+                home.join(".okf-mcp/config.yml"),
+                "custom_providers:\n  myvllm:\n    base_url: https://global.example/v1\n",
+            )
+            .unwrap();
+
+            let vault = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+            std::fs::write(
+                vault.path().join(".okf/config.toml"),
+                "[providers.myvllm]\nbase_url = \"https://vault.example/v1\"\n",
+            )
+            .unwrap();
+
+            let options = vault_provider_options_for_provider(vault.path(), "myvllm").unwrap();
+            assert_eq!(
+                options.base_url_override.as_deref(),
+                Some("https://vault.example/v1")
+            );
+        });
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "ollama-cloud",
     "moonshot",
     "ollama",
+    "foundry-local",
     "custom",
 ];
 
@@ -120,6 +121,19 @@ pub fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
             base_url_env: Some("OLLAMA_HOST"),
             default_base_url: Some("http://localhost:11434/"),
         },
+        // Microsoft Foundry Local — a locally-run, OpenAI-compatible
+        // endpoint (no dedicated genai adapter exists for it, so it reuses
+        // the OpenAI adapter's wire protocol like "custom" does). No
+        // hardcoded default: Foundry Local's port is dynamic per-machine
+        // (discovered via `foundry service status`), so it must be set via
+        // FOUNDRY_LOCAL_ENDPOINT or an explicit override — same reasoning
+        // as "custom" having no default_base_url.
+        "foundry-local" => ProviderSpec {
+            adapter_kind: AdapterKind::OpenAI,
+            api_key_env: None,
+            base_url_env: Some("FOUNDRY_LOCAL_ENDPOINT"),
+            default_base_url: None,
+        },
         // Any other OpenAI-compatible endpoint (self-hosted vLLM, etc.) —
         // reuses the OpenAI adapter's wire protocol against a custom URL.
         "custom" => ProviderSpec {
@@ -175,6 +189,22 @@ fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
     }
 }
 
+/// Deterministic per-name env var for an ad-hoc/named custom provider's API
+/// key, e.g. `OKF_CUSTOM_PROVIDER_API_KEY__MYVLLM` for a provider named
+/// `"myvllm"` — the single source of truth for this format, used by
+/// `resolve_provider_target`'s fallback branch below when no explicit
+/// `api_key_env_override` is supplied, and by `setup_wizard.rs` when
+/// building that provider's reveal-gate env key, so the two can never
+/// drift.
+pub fn synthetic_api_key_env_name(provider: &str) -> String {
+    let sanitized: String = provider
+        .to_uppercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("OKF_CUSTOM_PROVIDER_API_KEY__{sanitized}")
+}
+
 /// Resolves everything `genai` needs to target a provider — the adapter
 /// kind, endpoint (scheme/trailing-slash normalized), and auth — from
 /// `provider_spec`'s hardcoded defaults, an optional vault-config
@@ -182,37 +212,70 @@ fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
 /// OS keychain/encrypted-file fallback `okf-mcp setup` writes to. Shared
 /// by `execute_compile_prompt` and `test_connection`'s per-provider probe
 /// so both resolve a provider's target identically.
+///
+/// A `provider` name outside `KNOWN_PROVIDERS` (a named custom provider
+/// configured via `okf-mcp setup`) is not an error by itself — it's only
+/// rejected when there's also no `base_url_override` to fall back on. When
+/// an override *is* present, it's treated as an ad-hoc OpenAI-compatible
+/// provider (same adapter as the hardcoded `"custom"` slot), which is what
+/// lets `--model <name>/<model>` work for any custom provider `okf-mcp
+/// setup` saved, not just the one hardcoded `"custom"` name.
 pub fn resolve_provider_target(
     provider: &str,
     base_url_override: Option<&str>,
     api_key_env_override: Option<&str>,
 ) -> anyhow::Result<(AdapterKind, Endpoint, AuthData)> {
-    let spec = provider_spec(provider)?;
+    let known_spec = provider_spec(provider);
+    if base_url_override.is_none()
+        && let Err(err) = known_spec
+    {
+        // No override to fall back on — surface the exact original error
+        // (a genuinely unknown provider with nothing to route it to).
+        return Err(err);
+    }
 
-    // A vault's `.okf/config.toml` [providers.<name>].api_key_env, if
-    // set, takes precedence over the hardcoded default for this provider.
-    let api_key_env = api_key_env_override.or(spec.api_key_env);
+    let (adapter_kind, hardcoded_api_key_env, base_url_env, default_base_url) = match &known_spec {
+        Ok(spec) => (
+            spec.adapter_kind,
+            spec.api_key_env,
+            spec.base_url_env,
+            spec.default_base_url,
+        ),
+        // Unrecognized name + an override present: treat as an ad-hoc
+        // OpenAI-compatible custom provider.
+        Err(_) => (AdapterKind::OpenAI, None, None, None),
+    };
 
-    if let Some(env_name) = api_key_env {
+    // A vault's `.okf/config.toml` [providers.<name>].api_key_env, if set,
+    // takes precedence over the hardcoded default for this provider; an
+    // unrecognized name with no such override falls back to the
+    // deterministic synthetic name so its keychain-saved key still seeds.
+    let api_key_env: Option<String> = api_key_env_override
+        .map(str::to_string)
+        .or_else(|| hardcoded_api_key_env.map(str::to_string))
+        .or_else(|| {
+            known_spec
+                .is_err()
+                .then(|| synthetic_api_key_env_name(provider))
+        });
+
+    if let Some(env_name) = &api_key_env {
         seed_env_from_credential_storage(env_name, provider);
     }
 
-    let auth = match api_key_env {
-        Some(env_name) => AuthData::from_env(env_name),
+    let auth = match &api_key_env {
+        Some(env_name) => AuthData::from_env(env_name.as_str()),
         None => AuthData::None,
     };
 
     let mut base_url = base_url_override
         .map(str::to_string)
-        .or_else(|| {
-            spec.base_url_env
-                .and_then(|env_name| std::env::var(env_name).ok())
-        })
-        .or_else(|| spec.default_base_url.map(str::to_string))
+        .or_else(|| base_url_env.and_then(|env_name| std::env::var(env_name).ok()))
+        .or_else(|| default_base_url.map(str::to_string))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "provider '{provider}' has no default base URL — set {} or pass a base URL override",
-                spec.base_url_env.unwrap_or("its base URL")
+                base_url_env.unwrap_or("its base URL")
             )
         })?;
 
@@ -223,7 +286,7 @@ pub fn resolve_provider_target(
         base_url.push('/');
     }
 
-    Ok((spec.adapter_kind, Endpoint::from_owned(base_url), auth))
+    Ok((adapter_kind, Endpoint::from_owned(base_url), auth))
 }
 
 /// Whether `err` looks like the provider rejected the *model name* itself
@@ -489,6 +552,47 @@ mod tests {
         let driver = LLMCompilerDriver::new();
         let err = driver.list_models("custom", None, None).await.unwrap_err();
         assert!(err.to_string().contains("no default base URL"));
+    }
+
+    #[test]
+    fn resolve_provider_target_treats_an_unrecognized_name_with_an_override_as_openai_compatible() {
+        let (adapter_kind, endpoint, auth) = resolve_provider_target(
+            "totally-unknown-provider",
+            Some("https://example.com/v1"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(adapter_kind, AdapterKind::OpenAI);
+        assert_eq!(endpoint.base_url(), "https://example.com/v1/");
+        match auth {
+            AuthData::FromEnv(env_name) => {
+                assert_eq!(
+                    env_name,
+                    synthetic_api_key_env_name("totally-unknown-provider")
+                );
+            }
+            _ => panic!("expected AuthData::FromEnv"),
+        }
+    }
+
+    #[test]
+    fn resolve_provider_target_prefers_an_explicit_api_key_env_override_over_the_synthetic_name() {
+        let (_, _, auth) = resolve_provider_target(
+            "another-unrecognized-provider",
+            Some("https://example.com/v1"),
+            Some("SOME_EXPLICIT_ENV_VAR"),
+        )
+        .unwrap();
+        match auth {
+            AuthData::FromEnv(env_name) => assert_eq!(env_name, "SOME_EXPLICIT_ENV_VAR"),
+            _ => panic!("expected AuthData::FromEnv"),
+        }
+    }
+
+    #[test]
+    fn resolve_provider_target_still_rejects_a_genuinely_unknown_provider_with_no_override() {
+        let err = resolve_provider_target("not-a-real-provider", None, None).unwrap_err();
+        assert!(err.to_string().contains("unknown LLM provider"));
     }
 
     #[test]
