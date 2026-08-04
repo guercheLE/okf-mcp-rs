@@ -19,26 +19,114 @@
 // fields that already have a saved value offer a keep/overwrite choice
 // instead of unconditionally re-prompting and re-saving.
 //
-// `inquire`'s prompts are blocking — run through `spawn_blocking`, the
-// same pattern mcpify's own `auth_profile::prompt` documents for calling
-// it from an async runtime.
+// All actual `inquire` calls live behind the `Prompts` trait
+// (`RealPrompts` is the only production impl) — every decision this
+// wizard makes (what to ask, how to branch on the answer, what to save)
+// is a plain function taking `&dyn Prompts`, so it's testable with a
+// scripted fake instead of a real TTY. `inquire`'s prompts are blocking —
+// `RealPrompts` runs them through `spawn_blocking`, the same pattern
+// mcpify's own `auth_profile::prompt` documents for calling it from an
+// async runtime.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use okf_mcp::compiler::provider::{self, KNOWN_PROVIDERS};
 use okf_mcp::core::config_manager;
 use okf_mcp::core::config_schema::{AuthMethod, Config, CustomProviderEntry, Transport};
 use okf_mcp::core::credential_storage::{credential_exists, load_credential, save_credential};
 
-async fn prompt_base_url(default: &str) -> anyhow::Result<String> {
-    let default = default.to_string();
-    let url = tokio::task::spawn_blocking(move || {
-        inquire::Text::new("Firecrawl base URL:")
-            .with_default(&default)
-            .prompt()
-    })
-    .await??;
+/// Every interactive prompt shape this wizard uses, abstracted so
+/// `RealPrompts` (production, backed by `inquire`) and a scripted test
+/// fake can both implement it — every `prompt_*`/`run_setup_wizard_with`
+/// function below is then plain, deterministic logic given a `&dyn
+/// Prompts`, not itself coupled to a real terminal.
+#[async_trait]
+trait Prompts: Send + Sync {
+    async fn text(&self, message: String, default: Option<String>) -> anyhow::Result<String>;
+    async fn confirm(&self, message: String, default: bool) -> anyhow::Result<bool>;
+    async fn password(&self, message: String) -> anyhow::Result<String>;
+    async fn select(
+        &self,
+        message: String,
+        choices: Vec<&'static str>,
+        starting_cursor: usize,
+    ) -> anyhow::Result<&'static str>;
+    async fn multi_select(
+        &self,
+        message: String,
+        choices: Vec<&'static str>,
+        default_indices: Vec<usize>,
+    ) -> anyhow::Result<Vec<&'static str>>;
+}
+
+struct RealPrompts;
+
+#[async_trait]
+impl Prompts for RealPrompts {
+    async fn text(&self, message: String, default: Option<String>) -> anyhow::Result<String> {
+        Ok(tokio::task::spawn_blocking(move || {
+            let mut prompt = inquire::Text::new(&message);
+            if let Some(default) = &default {
+                prompt = prompt.with_default(default);
+            }
+            prompt.prompt()
+        })
+        .await??)
+    }
+
+    async fn confirm(&self, message: String, default: bool) -> anyhow::Result<bool> {
+        Ok(tokio::task::spawn_blocking(move || {
+            inquire::Confirm::new(&message)
+                .with_default(default)
+                .prompt()
+        })
+        .await??)
+    }
+
+    async fn password(&self, message: String) -> anyhow::Result<String> {
+        Ok(tokio::task::spawn_blocking(move || {
+            inquire::Password::new(&message)
+                .without_confirmation()
+                .prompt()
+        })
+        .await??)
+    }
+
+    async fn select(
+        &self,
+        message: String,
+        choices: Vec<&'static str>,
+        starting_cursor: usize,
+    ) -> anyhow::Result<&'static str> {
+        Ok(tokio::task::spawn_blocking(move || {
+            inquire::Select::new(&message, choices)
+                .with_starting_cursor(starting_cursor)
+                .prompt()
+        })
+        .await??)
+    }
+
+    async fn multi_select(
+        &self,
+        message: String,
+        choices: Vec<&'static str>,
+        default_indices: Vec<usize>,
+    ) -> anyhow::Result<Vec<&'static str>> {
+        Ok(tokio::task::spawn_blocking(move || {
+            inquire::MultiSelect::new(&message, choices)
+                .with_default(&default_indices)
+                .prompt()
+        })
+        .await??)
+    }
+}
+
+async fn prompt_base_url(prompts: &dyn Prompts, default: &str) -> anyhow::Result<String> {
+    let url = prompts
+        .text("Firecrawl base URL:".to_string(), Some(default.to_string()))
+        .await?;
 
     let client = reqwest::Client::new();
     match client
@@ -92,26 +180,20 @@ enum SecretDecision {
 /// whether to keep it — if kept, nothing is re-prompted or re-saved. If
 /// nothing is saved yet, or the operator chooses to overwrite, prompts for
 /// a new value via `Password`.
-async fn prompt_secret_decision(label: &str, account: &str) -> anyhow::Result<SecretDecision> {
+async fn prompt_secret_decision(
+    prompts: &dyn Prompts,
+    label: &str,
+    account: &str,
+) -> anyhow::Result<SecretDecision> {
     if credential_exists(account)? {
-        let confirm_label = label.to_string();
-        let keep = tokio::task::spawn_blocking(move || {
-            inquire::Confirm::new(&format!("Keep the saved {confirm_label}?"))
-                .with_default(true)
-                .prompt()
-        })
-        .await??;
+        let keep = prompts
+            .confirm(format!("Keep the saved {label}?"), true)
+            .await?;
         if keep {
             return Ok(SecretDecision::KeepExisting);
         }
     }
-    let prompt_label = label.to_string();
-    let value = tokio::task::spawn_blocking(move || {
-        inquire::Password::new(&format!("{prompt_label}:"))
-            .without_confirmation()
-            .prompt()
-    })
-    .await??;
+    let value = prompts.password(format!("{label}:")).await?;
     Ok(SecretDecision::New(value))
 }
 
@@ -119,11 +201,14 @@ async fn prompt_secret_decision(label: &str, account: &str) -> anyhow::Result<Se
 /// the keychain (if the operator chose to keep the existing value) or
 /// freshly entered — plus whether a new value needs saving.
 async fn prompt_firecrawl_credentials(
+    prompts: &dyn Prompts,
     auth_method: AuthMethod,
 ) -> anyhow::Result<(HashMap<String, String>, bool)> {
     match auth_method {
         AuthMethod::Pat => {
-            match prompt_secret_decision("Firecrawl personal access token", "firecrawl").await? {
+            match prompt_secret_decision(prompts, "Firecrawl personal access token", "firecrawl")
+                .await?
+            {
                 SecretDecision::KeepExisting => {
                     let existing = load_credential("firecrawl")?.ok_or_else(|| {
                         anyhow::anyhow!("expected an existing Firecrawl credential")
@@ -147,7 +232,7 @@ async fn prompt_api_version() -> anyhow::Result<String> {
 }
 // mcpify:versions:end
 
-async fn prompt_transport(default: Transport) -> anyhow::Result<Transport> {
+async fn prompt_transport(prompts: &dyn Prompts, default: Transport) -> anyhow::Result<Transport> {
     let choices = vec![
         "stdio (spawned as a subprocess by the MCP client)",
         "http (a standalone server the MCP client connects to over the network)",
@@ -156,12 +241,13 @@ async fn prompt_transport(default: Transport) -> anyhow::Result<Transport> {
         Transport::Stdio => 0,
         Transport::Http => 1,
     };
-    let selection = tokio::task::spawn_blocking(move || {
-        inquire::Select::new("Which transport will this deployment use?", choices)
-            .with_starting_cursor(starting_cursor)
-            .prompt()
-    })
-    .await??;
+    let selection = prompts
+        .select(
+            "Which transport will this deployment use?".to_string(),
+            choices,
+            starting_cursor,
+        )
+        .await?;
 
     Ok(if selection.starts_with("stdio") {
         Transport::Stdio
@@ -198,29 +284,26 @@ struct CustomProviderChoice {
 /// time (no saved value yet), which is where a provider-specific hint
 /// (e.g. "leave blank if not needed") matters most.
 async fn prompt_provider_api_key(
+    prompts: &dyn Prompts,
     label: &str,
     account: &str,
     key_prompt_message: &str,
 ) -> anyhow::Result<ProviderKeyResult> {
     if credential_exists(account)? {
-        return Ok(match prompt_secret_decision(label, account).await? {
-            SecretDecision::KeepExisting => {
-                let existing = load_credential(account)?.unwrap_or_default();
-                ProviderKeyResult {
-                    value: Some(existing),
-                    freshly_entered: false,
+        return Ok(
+            match prompt_secret_decision(prompts, label, account).await? {
+                SecretDecision::KeepExisting => {
+                    let existing = load_credential(account)?.unwrap_or_default();
+                    ProviderKeyResult {
+                        value: Some(existing),
+                        freshly_entered: false,
+                    }
                 }
-            }
-            SecretDecision::New(value) => provider_key_from_input(value),
-        });
+                SecretDecision::New(value) => provider_key_from_input(value),
+            },
+        );
     }
-    let message = key_prompt_message.to_string();
-    let value = tokio::task::spawn_blocking(move || {
-        inquire::Password::new(&message)
-            .without_confirmation()
-            .prompt()
-    })
-    .await??;
+    let value = prompts.password(key_prompt_message.to_string()).await?;
     Ok(provider_key_from_input(value))
 }
 
@@ -249,10 +332,28 @@ fn save_new_key(name: &str, key: &ProviderKeyResult) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Prompts for a new custom provider's name, validated against collision
-/// with `KNOWN_PROVIDERS` (including `"custom"` itself) and with any
-/// custom provider already added earlier in this same run.
+/// Pure validation for a candidate custom-provider name — non-empty, no
+/// `/` (would break `parse_model_spec`'s split), and not already taken by
+/// a known provider or one added earlier this run.
+fn validate_custom_provider_name(input: &str, taken: &[String]) -> Result<(), &'static str> {
+    let input = input.trim();
+    if input.is_empty() {
+        Err("name can't be empty")
+    } else if input.contains('/') {
+        Err("name can't contain '/'")
+    } else if taken.iter().any(|t| t == input) {
+        Err("name already in use")
+    } else {
+        Ok(())
+    }
+}
+
+/// Prompts for a new custom provider's name, retrying (with an error
+/// message) until `validate_custom_provider_name` accepts it — validated
+/// against collision with `KNOWN_PROVIDERS` (including `"custom"` itself)
+/// and with any custom provider already added earlier in this same run.
 async fn prompt_custom_provider_name(
+    prompts: &dyn Prompts,
     custom_so_far: &[CustomProviderChoice],
 ) -> anyhow::Result<String> {
     let taken: Vec<String> = KNOWN_PROVIDERS
@@ -260,30 +361,35 @@ async fn prompt_custom_provider_name(
         .map(|s| s.to_string())
         .chain(custom_so_far.iter().map(|c| c.name.clone()))
         .collect();
-    let name = tokio::task::spawn_blocking(move || {
-        inquire::Text::new("Custom provider name (used as <name> in --model <name>/<model>):")
-            .with_validator(move |input: &str| {
-                let input = input.trim();
-                if input.is_empty() {
-                    Ok(inquire::validator::Validation::Invalid(
-                        "name can't be empty".into(),
-                    ))
-                } else if input.contains('/') {
-                    Ok(inquire::validator::Validation::Invalid(
-                        "name can't contain '/'".into(),
-                    ))
-                } else if taken.iter().any(|t| t == input) {
-                    Ok(inquire::validator::Validation::Invalid(
-                        "name already in use".into(),
-                    ))
-                } else {
-                    Ok(inquire::validator::Validation::Valid)
-                }
-            })
-            .prompt()
-    })
-    .await??;
-    Ok(name.trim().to_string())
+    loop {
+        let input = prompts
+            .text(
+                "Custom provider name (used as <name> in --model <name>/<model>):".to_string(),
+                None,
+            )
+            .await?;
+        match validate_custom_provider_name(&input, &taken) {
+            Ok(()) => return Ok(input.trim().to_string()),
+            Err(message) => println!("{message} — try again."),
+        }
+    }
+}
+
+/// Which indices into `names` should be pre-selected in the known-provider
+/// multi-select — those already having a saved credential, per
+/// `already_configured`. Takes a closure rather than calling
+/// `credential_exists` directly so this decision is testable without
+/// touching the real OS keychain.
+fn provider_default_indices(
+    names: &[&str],
+    mut already_configured: impl FnMut(&str) -> bool,
+) -> Vec<usize> {
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| already_configured(name))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Optional: known-provider API keys (multi-select) plus zero, one, or
@@ -292,16 +398,16 @@ async fn prompt_custom_provider_name(
 /// re-run reuse a previously-configured custom provider's endpoint
 /// silently, without re-asking for it.
 async fn prompt_llm_providers(
+    prompts: &dyn Prompts,
     existing_custom_providers: &HashMap<String, CustomProviderEntry>,
 ) -> anyhow::Result<(Vec<KnownProviderChoice>, Vec<CustomProviderChoice>)> {
-    let configure = tokio::task::spawn_blocking(|| {
-        inquire::Confirm::new(
-            "Configure LLM provider(s) now, for `okf-mcp compile`/`rebuild`? (optional)",
+    let configure = prompts
+        .confirm(
+            "Configure LLM provider(s) now, for `okf-mcp compile`/`rebuild`? (optional)"
+                .to_string(),
+            true,
         )
-        .with_default(true)
-        .prompt()
-    })
-    .await??;
+        .await?;
     if !configure {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -311,19 +417,17 @@ async fn prompt_llm_providers(
         .copied()
         .filter(|p| *p != "custom")
         .collect();
-    let default_indices: Vec<usize> = known_names
-        .iter()
-        .enumerate()
-        .filter(|(_, name)| credential_exists(&format!("llm-{name}")).unwrap_or(false))
-        .map(|(index, _)| index)
-        .collect();
+    let default_indices = provider_default_indices(&known_names, |name| {
+        credential_exists(&format!("llm-{name}")).unwrap_or(false)
+    });
 
-    let selected = tokio::task::spawn_blocking(move || {
-        inquire::MultiSelect::new("Known LLM providers to configure:", known_names)
-            .with_default(&default_indices)
-            .prompt()
-    })
-    .await??;
+    let selected = prompts
+        .multi_select(
+            "Known LLM providers to configure:".to_string(),
+            known_names,
+            default_indices,
+        )
+        .await?;
 
     let mut known = Vec::new();
     for name in selected {
@@ -336,32 +440,36 @@ async fn prompt_llm_providers(
                 freshly_entered: false,
             }
         } else {
-            prompt_provider_api_key(&name, &format!("llm-{name}"), &format!("{name} API key:"))
-                .await?
+            prompt_provider_api_key(
+                prompts,
+                &name,
+                &format!("llm-{name}"),
+                &format!("{name} API key:"),
+            )
+            .await?
         };
         known.push(KnownProviderChoice { name, key });
     }
 
     let mut custom = Vec::new();
-    let mut add_another = tokio::task::spawn_blocking(|| {
-        inquire::Confirm::new("Add a custom OpenAI-compatible provider (self-hosted vLLM, etc.)?")
-            .with_default(false)
-            .prompt()
-    })
-    .await??;
+    let mut add_another = prompts
+        .confirm(
+            "Add a custom OpenAI-compatible provider (self-hosted vLLM, etc.)?".to_string(),
+            false,
+        )
+        .await?;
     while add_another {
-        let name = prompt_custom_provider_name(&custom).await?;
+        let name = prompt_custom_provider_name(prompts, &custom).await?;
         let base_url = if let Some(entry) = existing_custom_providers.get(&name) {
             println!("Reusing saved endpoint for {name}: {}", entry.base_url);
             entry.base_url.clone()
         } else {
-            let label = name.clone();
-            tokio::task::spawn_blocking(move || {
-                inquire::Text::new(&format!("Endpoint (base URL) for {label}:")).prompt()
-            })
-            .await??
+            prompts
+                .text(format!("Endpoint (base URL) for {name}:"), None)
+                .await?
         };
         let key = prompt_provider_api_key(
+            prompts,
             &name,
             &format!("llm-{name}"),
             "API key (if this provider does not require one, leave blank or enter anything):",
@@ -373,12 +481,9 @@ async fn prompt_llm_providers(
             key,
         });
 
-        add_another = tokio::task::spawn_blocking(|| {
-            inquire::Confirm::new("Add another custom provider?")
-                .with_default(false)
-                .prompt()
-        })
-        .await??;
+        add_another = prompts
+            .confirm("Add another custom provider?".to_string(), false)
+            .await?;
     }
 
     Ok((known, custom))
@@ -393,19 +498,59 @@ struct RevealableSecret {
     value: String,
 }
 
+/// Builds the list of secrets this run knows about (the Firecrawl PAT plus
+/// every provider key that resolved to a real value) — pure given
+/// already-resolved credentials/provider choices, so testable without any
+/// prompting or I/O beyond the (also pure) provider-spec lookups.
+fn collect_revealable_secrets(
+    credentials: &HashMap<String, String>,
+    known_providers: &[KnownProviderChoice],
+    custom_providers: &[CustomProviderChoice],
+) -> anyhow::Result<Vec<RevealableSecret>> {
+    let mut secrets = Vec::new();
+    if let Some(token) = credentials.get("token") {
+        secrets.push(RevealableSecret {
+            label: "the Firecrawl personal access token".to_string(),
+            env_key: "OKF_MCP_FIRECRAWL_API_PAT".to_string(),
+            value: token.clone(),
+        });
+    }
+    for provider in known_providers {
+        if let Some(value) = &provider.key.value {
+            let env_key = okf_mcp::compiler::provider::provider_spec(&provider.name)?
+                .api_key_env
+                .expect("a known provider with a resolved key must declare an api_key_env")
+                .to_string();
+            secrets.push(RevealableSecret {
+                label: format!("the {} API key", provider.name),
+                env_key,
+                value: value.clone(),
+            });
+        }
+    }
+    for provider in custom_providers {
+        if let Some(value) = &provider.key.value {
+            secrets.push(RevealableSecret {
+                label: format!("the {} API key", provider.name),
+                env_key: okf_mcp::compiler::provider::synthetic_api_key_env_name(&provider.name),
+                value: value.clone(),
+            });
+        }
+    }
+    Ok(secrets)
+}
+
 /// One `Confirm` per secret, default `false` — the sole gate on whether a
 /// secret's real value ever leaves the OS keychain/encrypted-file store.
-async fn prompt_secret_reveal(label: &str) -> anyhow::Result<bool> {
-    let label = label.to_string();
-    let reveal = tokio::task::spawn_blocking(move || {
-        inquire::Confirm::new(&format!(
-            "Include {label}'s real value in the MCP client config printed/saved at the end?"
-        ))
-        .with_default(false)
-        .prompt()
-    })
-    .await??;
-    Ok(reveal)
+async fn prompt_secret_reveal(prompts: &dyn Prompts, label: &str) -> anyhow::Result<bool> {
+    prompts
+        .confirm(
+            format!(
+                "Include {label}'s real value in the MCP client config printed/saved at the end?"
+            ),
+            false,
+        )
+        .await
 }
 
 /// Inserts each secret's real value into `env` only if the operator opted
@@ -526,6 +671,7 @@ async fn write_config_yaml(
 }
 
 async fn prompt_persistence(
+    prompts: &dyn Prompts,
     env: &HashMap<String, String>,
     config_fields: &serde_json::Value,
     secret_keys: &HashSet<String>,
@@ -536,10 +682,13 @@ async fn prompt_persistence(
         "Write a config.yml file (local — ./okf-mcp.config.yml, read only from this directory)",
         "Print a ready-to-run CLI invocation (nothing written to disk)",
     ];
-    let selection = tokio::task::spawn_blocking(move || {
-        inquire::Select::new("How should these settings be saved?", choices).prompt()
-    })
-    .await??;
+    let selection = prompts
+        .select(
+            "How should these settings be saved?".to_string(),
+            choices,
+            0,
+        )
+        .await?;
 
     persist_selection(selection, env, config_fields, secret_keys).await
 }
@@ -695,15 +844,15 @@ fn print_mcp_client_config(
     }
 }
 
-pub async fn run_setup_wizard() -> anyhow::Result<()> {
+async fn run_setup_wizard_with(prompts: &dyn Prompts) -> anyhow::Result<()> {
     let existing = existing_config_or_defaults();
 
-    let url = prompt_base_url(&existing.firecrawl_base_url).await?;
+    let url = prompt_base_url(prompts, &existing.firecrawl_base_url).await?;
     let auth_method = prompt_auth_method().await?;
     let (credentials, firecrawl_freshly_entered) =
-        prompt_firecrawl_credentials(auth_method).await?;
+        prompt_firecrawl_credentials(prompts, auth_method).await?;
     let api_version = prompt_api_version().await?;
-    let transport = prompt_transport(existing.transport).await?;
+    let transport = prompt_transport(prompts, existing.transport).await?;
 
     if firecrawl_freshly_entered {
         save_credential("firecrawl", &serde_json::to_string(&credentials)?)?;
@@ -713,7 +862,7 @@ pub async fn run_setup_wizard() -> anyhow::Result<()> {
     }
 
     let (known_providers, custom_providers) =
-        prompt_llm_providers(&existing.custom_providers).await?;
+        prompt_llm_providers(prompts, &existing.custom_providers).await?;
 
     for provider in &known_providers {
         save_new_key(&provider.name, &provider.key)?;
@@ -722,40 +871,11 @@ pub async fn run_setup_wizard() -> anyhow::Result<()> {
         save_new_key(&provider.name, &provider.key)?;
     }
 
-    let mut secrets = Vec::new();
-    if let Some(token) = credentials.get("token") {
-        secrets.push(RevealableSecret {
-            label: "the Firecrawl personal access token".to_string(),
-            env_key: "OKF_MCP_FIRECRAWL_API_PAT".to_string(),
-            value: token.clone(),
-        });
-    }
-    for provider in &known_providers {
-        if let Some(value) = &provider.key.value {
-            let env_key = okf_mcp::compiler::provider::provider_spec(&provider.name)?
-                .api_key_env
-                .expect("a known provider with a resolved key must declare an api_key_env")
-                .to_string();
-            secrets.push(RevealableSecret {
-                label: format!("the {} API key", provider.name),
-                env_key,
-                value: value.clone(),
-            });
-        }
-    }
-    for provider in &custom_providers {
-        if let Some(value) = &provider.key.value {
-            secrets.push(RevealableSecret {
-                label: format!("the {} API key", provider.name),
-                env_key: okf_mcp::compiler::provider::synthetic_api_key_env_name(&provider.name),
-                value: value.clone(),
-            });
-        }
-    }
+    let secrets = collect_revealable_secrets(&credentials, &known_providers, &custom_providers)?;
 
     let mut revealed = HashSet::new();
     for secret in &secrets {
-        if prompt_secret_reveal(&secret.label).await? {
+        if prompt_secret_reveal(prompts, &secret.label).await? {
             revealed.insert(secret.env_key.clone());
         }
     }
@@ -765,7 +885,7 @@ pub async fn run_setup_wizard() -> anyhow::Result<()> {
     apply_reveals(&mut env, &secrets, &revealed);
 
     let secret_keys: HashSet<String> = secrets.iter().map(|s| s.env_key.clone()).collect();
-    prompt_persistence(&env, &config_fields, &secret_keys).await?;
+    prompt_persistence(prompts, &env, &config_fields, &secret_keys).await?;
     print_mcp_client_config(transport, auth_method, &env);
 
     let run_command = match transport {
@@ -776,9 +896,96 @@ pub async fn run_setup_wizard() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn run_setup_wizard() -> anyhow::Result<()> {
+    run_setup_wizard_with(&RealPrompts).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okf_mcp::core::credential_storage::delete_credential;
+
+    /// A queue of canned answers, consumed in call order — lets
+    /// `prompt_*`/`run_setup_wizard_with` be tested end-to-end without a
+    /// real TTY. Panics (rather than erroring) on an exhausted queue or a
+    /// type mismatch, since either means the test's script doesn't match
+    /// what the code under test actually asked for.
+    #[derive(Debug)]
+    enum ScriptedAnswer {
+        Text(String),
+        Confirm(bool),
+        Password(String),
+        Select(&'static str),
+        MultiSelect(Vec<&'static str>),
+    }
+
+    struct ScriptedPrompts {
+        answers: std::sync::Mutex<std::collections::VecDeque<ScriptedAnswer>>,
+    }
+
+    impl ScriptedPrompts {
+        fn new(answers: Vec<ScriptedAnswer>) -> Self {
+            Self {
+                answers: std::sync::Mutex::new(answers.into_iter().collect()),
+            }
+        }
+
+        fn next(&self) -> ScriptedAnswer {
+            self.answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ScriptedPrompts ran out of scripted answers")
+        }
+    }
+
+    #[async_trait]
+    impl Prompts for ScriptedPrompts {
+        async fn text(&self, _message: String, _default: Option<String>) -> anyhow::Result<String> {
+            match self.next() {
+                ScriptedAnswer::Text(value) => Ok(value),
+                other => panic!("expected a scripted Text answer, got {other:?}"),
+            }
+        }
+
+        async fn confirm(&self, _message: String, _default: bool) -> anyhow::Result<bool> {
+            match self.next() {
+                ScriptedAnswer::Confirm(value) => Ok(value),
+                other => panic!("expected a scripted Confirm answer, got {other:?}"),
+            }
+        }
+
+        async fn password(&self, _message: String) -> anyhow::Result<String> {
+            match self.next() {
+                ScriptedAnswer::Password(value) => Ok(value),
+                other => panic!("expected a scripted Password answer, got {other:?}"),
+            }
+        }
+
+        async fn select(
+            &self,
+            _message: String,
+            _choices: Vec<&'static str>,
+            _starting_cursor: usize,
+        ) -> anyhow::Result<&'static str> {
+            match self.next() {
+                ScriptedAnswer::Select(value) => Ok(value),
+                other => panic!("expected a scripted Select answer, got {other:?}"),
+            }
+        }
+
+        async fn multi_select(
+            &self,
+            _message: String,
+            _choices: Vec<&'static str>,
+            _default_indices: Vec<usize>,
+        ) -> anyhow::Result<Vec<&'static str>> {
+            match self.next() {
+                ScriptedAnswer::MultiSelect(value) => Ok(value),
+                other => panic!("expected a scripted MultiSelect answer, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn runtime_settings_use_the_canonical_firecrawl_env_var_names() {
@@ -949,5 +1156,269 @@ mod tests {
         assert!(contents.contains("existing-provider"));
         assert!(contents.contains("new-provider"));
         assert!(contents.contains("transport: stdio"));
+    }
+
+    #[test]
+    fn validate_custom_provider_name_rejects_empty_slash_and_taken_names() {
+        let taken = vec!["anthropic".to_string(), "myvllm".to_string()];
+        assert_eq!(
+            validate_custom_provider_name("", &taken),
+            Err("name can't be empty")
+        );
+        assert_eq!(
+            validate_custom_provider_name("   ", &taken),
+            Err("name can't be empty")
+        );
+        assert_eq!(
+            validate_custom_provider_name("foo/bar", &taken),
+            Err("name can't contain '/'")
+        );
+        assert_eq!(
+            validate_custom_provider_name("anthropic", &taken),
+            Err("name already in use")
+        );
+        assert_eq!(
+            validate_custom_provider_name("myvllm", &taken),
+            Err("name already in use")
+        );
+        assert_eq!(
+            validate_custom_provider_name("brand-new-name", &taken),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn provider_default_indices_selects_only_already_configured_names() {
+        let names = ["anthropic", "openai", "ollama"];
+        let indices = provider_default_indices(&names, |name| name == "openai");
+        assert_eq!(indices, vec![1]);
+    }
+
+    #[test]
+    fn collect_revealable_secrets_covers_firecrawl_known_and_custom_keys() {
+        let mut credentials = HashMap::new();
+        credentials.insert("token".to_string(), "firecrawl-pat".to_string());
+
+        let known = vec![KnownProviderChoice {
+            name: "anthropic".to_string(),
+            key: ProviderKeyResult {
+                value: Some("anthropic-key".to_string()),
+                freshly_entered: true,
+            },
+        }];
+        let custom = vec![CustomProviderChoice {
+            name: "myvllm".to_string(),
+            base_url: "https://myvllm.example/v1".to_string(),
+            key: ProviderKeyResult {
+                value: Some("myvllm-key".to_string()),
+                freshly_entered: true,
+            },
+        }];
+
+        let secrets = collect_revealable_secrets(&credentials, &known, &custom).unwrap();
+        assert_eq!(secrets.len(), 3);
+        assert!(
+            secrets
+                .iter()
+                .any(|s| s.env_key == "OKF_MCP_FIRECRAWL_API_PAT" && s.value == "firecrawl-pat")
+        );
+        assert!(
+            secrets
+                .iter()
+                .any(|s| s.env_key == "ANTHROPIC_API_KEY" && s.value == "anthropic-key")
+        );
+        assert!(secrets.iter().any(|s| s.env_key
+            == provider::synthetic_api_key_env_name("myvllm")
+            && s.value == "myvllm-key"));
+    }
+
+    #[test]
+    fn collect_revealable_secrets_omits_providers_with_no_resolved_key() {
+        let credentials = HashMap::new();
+        let known = vec![KnownProviderChoice {
+            name: "ollama".to_string(),
+            key: ProviderKeyResult {
+                value: None,
+                freshly_entered: false,
+            },
+        }];
+        let secrets = collect_revealable_secrets(&credentials, &known, &[]).unwrap();
+        assert!(secrets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompt_base_url_returns_the_provided_url() {
+        // Port 1 is reserved (nothing listens there), so this fails fast
+        // via connection-refused rather than waiting out the 5s
+        // reachability timeout — keeps the test quick while still
+        // exercising the unreachable-URL branch.
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Text(
+            "http://127.0.0.1:1/".to_string(),
+        )]);
+        let url = prompt_base_url(&prompts, "https://api.firecrawl.dev")
+            .await
+            .unwrap();
+        assert_eq!(url, "http://127.0.0.1:1/");
+    }
+
+    #[tokio::test]
+    async fn prompt_transport_maps_the_selected_choice_to_a_transport() {
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Select(
+            "http (a standalone server the MCP client connects to over the network)",
+        )]);
+        let transport = prompt_transport(&prompts, Transport::Stdio).await.unwrap();
+        assert!(matches!(transport, Transport::Http));
+    }
+
+    #[tokio::test]
+    async fn prompt_secret_decision_prompts_for_a_new_value_when_nothing_is_saved() {
+        let account = "zz-test-prompt-secret-decision-account-1";
+        let _ = delete_credential(account);
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Password("new-value".to_string())]);
+        let decision = prompt_secret_decision(&prompts, "test secret", account)
+            .await
+            .unwrap();
+        assert!(matches!(decision, SecretDecision::New(v) if v == "new-value"));
+        let _ = delete_credential(account);
+    }
+
+    #[tokio::test]
+    async fn prompt_secret_decision_offers_keep_when_a_value_is_already_saved() {
+        let account = "zz-test-prompt-secret-decision-account-2";
+        save_credential(account, "already-saved").unwrap();
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Confirm(true)]);
+        let decision = prompt_secret_decision(&prompts, "test secret", account)
+            .await
+            .unwrap();
+        assert!(matches!(decision, SecretDecision::KeepExisting));
+        let _ = delete_credential(account);
+    }
+
+    #[tokio::test]
+    async fn prompt_provider_api_key_treats_a_blank_answer_as_not_needed() {
+        let account = "zz-test-provider-api-key-account-1";
+        let _ = delete_credential(account);
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Password("   ".to_string())]);
+        let result = prompt_provider_api_key(&prompts, "test provider", account, "API key:")
+            .await
+            .unwrap();
+        assert_eq!(result.value, None);
+        assert!(!result.freshly_entered);
+        let _ = delete_credential(account);
+    }
+
+    #[tokio::test]
+    async fn prompt_provider_api_key_records_a_freshly_entered_value() {
+        let account = "zz-test-provider-api-key-account-2";
+        let _ = delete_credential(account);
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Password("real-key".to_string())]);
+        let result = prompt_provider_api_key(&prompts, "test provider", account, "API key:")
+            .await
+            .unwrap();
+        assert_eq!(result.value.as_deref(), Some("real-key"));
+        assert!(result.freshly_entered);
+        let _ = delete_credential(account);
+    }
+
+    #[tokio::test]
+    async fn prompt_custom_provider_name_retries_after_an_invalid_answer() {
+        let prompts = ScriptedPrompts::new(vec![
+            ScriptedAnswer::Text("anthropic".to_string()), // taken (known provider) -> invalid
+            ScriptedAnswer::Text("brand-new-name".to_string()), // valid
+        ]);
+        let name = prompt_custom_provider_name(&prompts, &[]).await.unwrap();
+        assert_eq!(name, "brand-new-name");
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_providers_returns_empty_when_declined() {
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Confirm(false)]);
+        let (known, custom) = prompt_llm_providers(&prompts, &HashMap::new())
+            .await
+            .unwrap();
+        assert!(known.is_empty());
+        assert!(custom.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_providers_configures_a_no_key_known_provider_and_one_custom_provider() {
+        let custom_provider_name = "zz-test-custom-provider-for-prompt-llm-providers";
+        let custom_account = format!("llm-{custom_provider_name}");
+        let _ = delete_credential(&custom_account);
+
+        let prompts = ScriptedPrompts::new(vec![
+            ScriptedAnswer::Confirm(true),               // configure providers? yes
+            ScriptedAnswer::MultiSelect(vec!["ollama"]), // select ollama (no key needed)
+            ScriptedAnswer::Confirm(true),               // add a custom provider? yes
+            ScriptedAnswer::Text(custom_provider_name.to_string()), // custom provider name
+            ScriptedAnswer::Text("https://zz-test.example/v1".to_string()), // endpoint
+            ScriptedAnswer::Password("custom-key".to_string()), // api key
+            ScriptedAnswer::Confirm(false),              // add another? no
+        ]);
+
+        let (known, custom) = prompt_llm_providers(&prompts, &HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].name, "ollama");
+        assert_eq!(known[0].key.value, None);
+
+        assert_eq!(custom.len(), 1);
+        assert_eq!(custom[0].name, custom_provider_name);
+        assert_eq!(custom[0].base_url, "https://zz-test.example/v1");
+        assert_eq!(custom[0].key.value.as_deref(), Some("custom-key"));
+
+        let _ = delete_credential(&custom_account);
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_providers_reuses_a_saved_custom_provider_endpoint_silently() {
+        let mut existing = HashMap::new();
+        existing.insert(
+            "zz-test-existing-custom".to_string(),
+            CustomProviderEntry {
+                base_url: "https://already-saved.example/v1".to_string(),
+            },
+        );
+        let account = "llm-zz-test-existing-custom";
+        let _ = delete_credential(account);
+
+        // No Text answer for the endpoint — if the code asked for one
+        // despite finding a saved entry, this test would panic on an
+        // exhausted queue.
+        let prompts = ScriptedPrompts::new(vec![
+            ScriptedAnswer::Confirm(true),
+            ScriptedAnswer::MultiSelect(vec![]),
+            ScriptedAnswer::Confirm(true),
+            ScriptedAnswer::Text("zz-test-existing-custom".to_string()),
+            ScriptedAnswer::Password("".to_string()),
+            ScriptedAnswer::Confirm(false),
+        ]);
+
+        let (_, custom) = prompt_llm_providers(&prompts, &existing).await.unwrap();
+        assert_eq!(custom.len(), 1);
+        assert_eq!(custom[0].base_url, "https://already-saved.example/v1");
+        assert_eq!(custom[0].key.value, None);
+
+        let _ = delete_credential(account);
+    }
+
+    #[tokio::test]
+    async fn prompt_secret_reveal_returns_the_scripted_confirm_value() {
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Confirm(true)]);
+        assert!(prompt_secret_reveal(&prompts, "a secret").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn prompt_persistence_delegates_to_the_selected_choice() {
+        let prompts = ScriptedPrompts::new(vec![ScriptedAnswer::Select(
+            "Print a ready-to-run CLI invocation (nothing written to disk)",
+        )]);
+        let (env, config) =
+            build_runtime_settings("https://api.example/v1", "default", Transport::Stdio).unwrap();
+        prompt_persistence(&prompts, &env, &config, &HashSet::new())
+            .await
+            .unwrap();
     }
 }
