@@ -73,8 +73,8 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 | Command | Args | Description |
 | --- | --- | --- |
 | `ingest` | `<URL\|FILE> [--tag <tag>]...` | Fetch a URL (via Firecrawl) or read a local file and add it to the vault's raw sources; `--tag` is repeatable |
-| `compile` | `[--model] [--diff]` | Compile newly-ingested raw sources into wiki concept pages |
-| `rebuild` | `[--model] [--force]` | Recompile the wiki from all active raw sources |
+| `compile` | `[--model] [--diff] [--concurrency <N>]` | Compile newly-ingested raw sources into wiki concept pages |
+| `rebuild` | `[--model] [--force] [--concurrency <N>]` | Recompile the wiki from all active raw sources |
 | `models` | `<provider>` | List a provider's available models (e.g. before picking `--model`) |
 | `lint` | `[--strict] [--json]` | Check wikilinks, frontmatter, and source provenance in the wiki |
 | `reindex` | `[--embeddings]` | Rebuild the local text and vector index used by search |
@@ -83,12 +83,28 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 | `run` | `<URL\|FILE> [--tag <tag>]... [--model]` | Ingest, compile, lint, and commit as one step; `--tag` is repeatable |
 | `vault list` / `add` / `create` / `remove` (`rm`) / `delete` / `default` | — | Manage vaults / knowledge bases — also reachable as `kb ...` |
 | `setup` | — | Configure the Firecrawl API key and an LLM provider key |
+| `credentials list` | — | List every account a credential could be saved under, and whether one actually is (never the value) |
+| `credentials clear` | `[--provider <name>] [--all] [-y/--yes]` | Delete one (`--provider`) or all (`--all`) saved credentials; prompts for confirmation unless `--yes` |
 | `test-connection` | — | Verify Firecrawl is reachable and report which LLM providers are configured |
 | `config` | — | Print configuration grouped by source: global/local config files, env vars, vault config, credential presence, and the final resolved result (secrets redacted throughout) |
 | `version` | — | Print the installed version |
 | `start` / `http` | `[--host] [--port] [--cors-allow]` | Start the MCP server over stdio / HTTP |
 
 Every content-touching subcommand also accepts the global `--vault <name|path>` flag.
+
+### Compiling large corpora
+
+Rough sizing, by file count in `raw/` and typical per-file length:
+
+- **Small** (dozens of files, article-length or shorter) — the default sequential `compile` is fine; there's no meaningful benefit to changing anything.
+- **Medium** (hundreds of files) — still fine sequentially, but `--concurrency` starts to save real wall-clock time.
+- **Large** (thousands of files, or many long documents) — compile several sources in parallel with `okf-mcp compile --concurrency 8` (same flag on `rebuild`). Honest caveat: raising concurrency trades away some cross-linking completeness within a concurrent batch for throughput, since sources compiled at the same time can't see each other's freshly-created concept pages the way a strictly sequential run can. The existing `lint`/`--fix` pass is the safety net — run it (or pass `--fix` to `compile`/`rebuild`) after a high-concurrency run to repair whatever broken links that trade-off left behind.
+
+`--concurrency` parallelizes *across* sources, not within one, so it won't help with an individual source that's unusually long on its own (e.g. a long chat-export conversation) — watch your provider's context-window limit for those. Run `okf-mcp models <provider>` to see what's currently available, and check the provider's own docs for that model's context-window size rather than relying on a number here.
+
+At very high volume, a local Ollama model (`ollama/<model>`) is worth considering for cost and privacy, at the usual local-model quality/speed trade-off.
+
+Also note: `.okf/config.toml`'s `[compiler].max_tokens` (see [Configuration](#configuration) below) now actually takes effect on every `compile`/`rebuild` call, capping each LLM response.
 
 ## MCP tools
 
@@ -228,6 +244,8 @@ Outbound Firecrawl calls (`services/api_client.rs`) pass through a rate limiter,
 ### Credential storage
 
 `okf-mcp setup` writes credentials to the OS-native secret store via the `keyring` crate (macOS Keychain / Windows Credential Manager / Linux Secret Service), under service `okf-mcp` — the Firecrawl key under account `firecrawl`, each LLM provider key under `llm-<provider>`. Falls back automatically to an AES-256-GCM-encrypted file at `~/.okf-mcp/credentials.enc` if no OS keychain backend is available.
+
+`okf-mcp credentials list` is `setup`'s read-only counterpart: it prints every account name a credential could be saved under (known providers, any configured custom providers, and `firecrawl`) and whether one actually is — never the credential's value. `okf-mcp credentials clear --provider <name>` (or `--all`, for every saved credential) deletes the matching keychain/encrypted-file entries; it prints what it's about to clear and asks for confirmation first, unless `--yes`/`-y` is passed.
 
 ## Testing
 

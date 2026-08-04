@@ -49,6 +49,10 @@ struct Cli {
 enum Command {
     /// Configure the Firecrawl API key and an LLM provider key
     Setup,
+    /// List or clear stored credentials (API keys saved via `setup`) —
+    /// the symmetric "undo" for `setup`
+    #[command(subcommand)]
+    Credentials(CredentialsCommand),
     /// Fetch a URL (via Firecrawl) or read a local file and add it to the
     /// vault's raw sources
     Ingest {
@@ -82,6 +86,13 @@ enum Command {
         /// changes and commit them automatically
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Compile this many sources concurrently (default 1, sequential).
+        /// Raising it trades some cross-linking completeness within a
+        /// concurrent wave for throughput — see `compiler::driver::compile`'s
+        /// doc comment for the exact trade-off; the post-compile lint pass
+        /// (and --fix) remain the safety net either way
+        #[arg(long, default_value_t = 1)]
+        concurrency: usize,
     },
     /// Recompile the wiki from all active raw sources
     Rebuild {
@@ -97,6 +108,9 @@ enum Command {
         /// Same as `compile --yes` — see its help for details
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Same as `compile --concurrency` — see its help for details
+        #[arg(long, default_value_t = 1)]
+        concurrency: usize,
     },
     /// List a provider's available models (e.g. before picking `--model`)
     Models {
@@ -176,6 +190,27 @@ enum Command {
     Config,
     /// Print the installed version
     Version,
+}
+
+#[derive(Subcommand)]
+enum CredentialsCommand {
+    /// List every account this codebase could have saved a credential
+    /// under, and whether one is actually saved — never the credential's
+    /// value
+    List,
+    /// Delete one or more saved credentials
+    Clear {
+        /// Provider name (e.g. "anthropic"; or "firecrawl" for the
+        /// Firecrawl credential) — clears just that one credential
+        #[arg(long)]
+        provider: Option<String>,
+        /// Clear every known credential
+        #[arg(long)]
+        all: bool,
+        /// Skip the confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,19 +327,25 @@ async fn main() -> anyhow::Result<()> {
 
     let result = match cli.command {
         Command::Setup => cli::setup::run().await,
+        Command::Credentials(CredentialsCommand::List) => cli::credentials::run_list(),
+        Command::Credentials(CredentialsCommand::Clear { provider, all, yes }) => {
+            cli::credentials::run_clear(provider.as_deref(), all, yes).await
+        }
         Command::Ingest { source, tag } => cli::ingest::run(&source, &tag, vault).await,
         Command::Compile {
             model,
             diff,
             fix,
             yes,
-        } => cli::compile::run(model.as_deref(), diff, fix, yes, vault).await,
+            concurrency,
+        } => cli::compile::run(model.as_deref(), diff, fix, yes, concurrency, vault).await,
         Command::Rebuild {
             model,
             force,
             fix,
             yes,
-        } => cli::rebuild::run(model.as_deref(), force, fix, yes, vault).await,
+            concurrency,
+        } => cli::rebuild::run(model.as_deref(), force, fix, yes, concurrency, vault).await,
         Command::Models { provider } => cli::models::run(&provider, vault).await,
         Command::Lint { strict, json, fix } => cli::lint::run(strict, json, fix, vault),
         Command::Reindex { embeddings } => cli::reindex::run(embeddings, vault),

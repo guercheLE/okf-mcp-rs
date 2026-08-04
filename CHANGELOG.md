@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `--concurrency <N>` on `compile`/`rebuild` (and MCP tools `okf-compile`/`okf-rebuild`): compile that many sources in parallel. Opt-in, defaults to `1` (today's sequential behavior).
+- Oversized prompts are now trimmed to a token budget before compiling a source, instead of being sent as-is.
+- `okf-mcp credentials list` / `okf-mcp credentials clear [--provider <name>] [--all] [--yes]`: the symmetric "undo" for `setup` — list every account a credential could be saved under (never the value), and delete one or all saved credentials, with a confirmation prompt by default. CLI-only, matching `setup`'s own precedent of no MCP tool counterpart (interactive prompting/credential management doesn't make sense over MCP).
+
+### Fixed
+- `.okf/config.toml`'s `[compiler].max_tokens` was parsed but never actually applied to compile/rebuild calls; it now takes effect.
+
 ## [0.6.0] - 2026-08-01
 
 ### Added

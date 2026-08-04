@@ -265,6 +265,17 @@ pub fn resolve_provider_target(
 
     let auth = match &api_key_env {
         Some(env_name) => AuthData::from_env(env_name.as_str()),
+        // `AdapterKind::OpenAI`'s shared request-building path always
+        // resolves `AuthData::single_key_value()` to build the
+        // `Authorization` header, which errors
+        // (`ResolverAuthDataNotSingleValue`) for `AuthData::None` — unlike
+        // `AdapterKind::Ollama`'s adapter, which never calls it, so
+        // `ollama`'s own "no key needed" case has always worked. A
+        // placeholder single value keeps that header-building step happy
+        // for other no-key OpenAI-compatible providers (`foundry-local`
+        // today); a local, auth-less server simply ignores whatever's in
+        // the header it never checks.
+        None if adapter_kind == AdapterKind::OpenAI => AuthData::from_single("not-needed"),
         None => AuthData::None,
     };
 
@@ -320,6 +331,22 @@ fn looks_like_model_not_found(err: &genai::Error) -> bool {
 /// of an indefinite hang.
 const LLM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Builds the `ChatOptions` `execute_compile_prompt` sends with each chat
+/// request — pulled out as its own pure function so `CompileOptions`'s
+/// `temperature`/`max_tokens` plumbing into `genai`'s `ChatOptions` builder
+/// can be unit-tested directly (via `ChatOptions`'s own public fields)
+/// without a real/mocked network call.
+fn build_chat_options(temperature: Option<f32>, max_tokens: Option<u32>) -> ChatOptions {
+    let mut options = ChatOptions::default();
+    if let Some(temperature) = temperature {
+        options = options.with_temperature(temperature as f64);
+    }
+    if let Some(max_tokens) = max_tokens {
+        options = options.with_max_tokens(max_tokens);
+    }
+    options
+}
+
 pub struct LLMCompilerDriver {
     client: Client,
 }
@@ -341,12 +368,14 @@ impl LLMCompilerDriver {
     /// Runs one system+user prompt through the resolved provider, returning
     /// the model's raw text response (compile::operations is responsible
     /// for parsing it as a `CompilePayload`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_compile_prompt(
         &self,
         full_model_spec: &str,
         system_prompt: &str,
         user_prompt: &str,
         temperature: Option<f32>,
+        max_tokens: Option<u32>,
         base_url_override: Option<&str>,
         api_key_env_override: Option<&str>,
     ) -> anyhow::Result<String> {
@@ -365,10 +394,7 @@ impl LLMCompilerDriver {
             ChatMessage::user(user_prompt),
         ]);
 
-        let mut options = ChatOptions::default();
-        if let Some(temperature) = temperature {
-            options = options.with_temperature(temperature as f64);
-        }
+        let options = build_chat_options(temperature, max_tokens);
 
         let response = match self
             .client
@@ -596,11 +622,69 @@ mod tests {
     }
 
     #[test]
+    fn resolve_provider_target_gives_a_no_key_openai_adapter_provider_a_resolvable_auth_value() {
+        // Regression test: `foundry-local` (api_key_env: None,
+        // AdapterKind::OpenAI) used to resolve to `AuthData::None`, which
+        // the shared OpenAI-adapter request path can't turn into an
+        // `Authorization` header — every real compile call against it
+        // failed with `ResolverAuthDataNotSingleValue` before this fix,
+        // even though the provider needs no key at all.
+        unsafe {
+            std::env::set_var("FOUNDRY_LOCAL_ENDPOINT", "http://localhost:5272/v1/");
+        }
+        let (adapter_kind, _, auth) = resolve_provider_target("foundry-local", None, None).unwrap();
+        assert_eq!(adapter_kind, AdapterKind::OpenAI);
+        assert!(
+            auth.single_key_value().is_ok(),
+            "AuthData must resolve to a single value so the OpenAI adapter's \
+             Authorization-header-building step doesn't error"
+        );
+        unsafe {
+            std::env::remove_var("FOUNDRY_LOCAL_ENDPOINT");
+        }
+    }
+
+    #[test]
+    fn resolve_provider_target_leaves_ollamas_no_key_auth_data_as_none() {
+        // Ollama's own adapter never calls `AuthData::single_key_value()`,
+        // so it must keep using `AuthData::None` unchanged — this pins
+        // that the OpenAI-adapter-specific fix above doesn't also touch
+        // Ollama's already-working no-key path.
+        let (adapter_kind, _, auth) = resolve_provider_target("ollama", None, None).unwrap();
+        assert_eq!(adapter_kind, AdapterKind::Ollama);
+        assert!(matches!(auth, AuthData::None));
+    }
+
+    #[test]
     fn looks_like_model_not_found_does_not_match_a_non_web_call_error() {
         let err = genai::Error::NoAuthData {
             model_iden: ModelIden::new(AdapterKind::Anthropic, "claude-bogus"),
         };
         assert!(!looks_like_model_not_found(&err));
+    }
+
+    #[test]
+    fn build_chat_options_sets_max_tokens_when_configured() {
+        // Regression guard for the `CompileOptions::max_tokens` ->
+        // `ChatOptions::with_max_tokens` plumbing — `.okf/config.toml`'s
+        // `[compiler].max_tokens` must actually reach the outgoing request.
+        let options = build_chat_options(None, Some(2048));
+        assert_eq!(options.max_tokens, Some(2048));
+        assert_eq!(options.temperature, None);
+    }
+
+    #[test]
+    fn build_chat_options_sets_both_temperature_and_max_tokens_when_both_are_configured() {
+        let options = build_chat_options(Some(0.5), Some(4096));
+        assert_eq!(options.temperature, Some(0.5));
+        assert_eq!(options.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn build_chat_options_leaves_both_unset_when_neither_is_configured() {
+        let options = build_chat_options(None, None);
+        assert_eq!(options.temperature, None);
+        assert_eq!(options.max_tokens, None);
     }
 
     #[test]

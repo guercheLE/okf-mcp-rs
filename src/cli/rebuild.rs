@@ -11,6 +11,7 @@ pub async fn run(
     force: bool,
     fix: bool,
     yes: bool,
+    concurrency: usize,
     vault: Option<&str>,
 ) -> anyhow::Result<()> {
     let vault_root = resolve_vault(vault)?;
@@ -21,7 +22,8 @@ pub async fn run(
     // underlying `compiler::compile` call, just under this command's name.
     let diff_only = !force;
     let output = Output::cli();
-    let options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+    let mut options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+    options.concurrency = concurrency;
     let report =
         compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output)).await?;
     report_and_commit(

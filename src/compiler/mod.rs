@@ -1,8 +1,10 @@
+pub mod concurrency;
 pub mod driver;
 pub mod link_fix;
 pub mod operations;
 pub mod prompts;
 pub mod provider;
+pub mod token_estimate;
 
 pub use driver::{
     CompileOptions, CompileReport, compile, list_models, resolve_model_spec,

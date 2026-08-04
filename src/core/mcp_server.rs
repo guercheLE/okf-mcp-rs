@@ -72,6 +72,11 @@ pub struct CompileArgs {
     /// referencing pages already cite
     #[serde(default)]
     pub fix: Option<bool>,
+    /// Compile this many sources concurrently (default 1, sequential) — see
+    /// `compiler::driver::compile`'s doc comment for the cross-linking
+    /// trade-off of raising it
+    #[serde(default)]
+    pub concurrency: Option<usize>,
     #[serde(default)]
     pub vault: Option<String>,
 }
@@ -90,6 +95,9 @@ pub struct RebuildArgs {
     /// Same as `CompileArgs::fix` — see its description for details
     #[serde(default)]
     pub fix: Option<bool>,
+    /// Same as `CompileArgs::concurrency` — see its description for details
+    #[serde(default)]
+    pub concurrency: Option<usize>,
     #[serde(default)]
     pub vault: Option<String>,
 }
@@ -251,11 +259,20 @@ impl OkfServer {
         self.run_tool("okf-compile", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
-            let options = CompileOptions {
-                temperature: args.temperature,
-                base_url_override: args.base_url_override,
-                ..Default::default()
-            };
+            // Start from the vault's `.okf/config.toml`-derived options (this
+            // is what actually populates `max_tokens`/`api_key_env_override`
+            // — see `compiler::vault_provider_options`), then let any
+            // explicit MCP args override individual fields. Mirrors the CLI
+            // path (`cli::compile::run`/`cli::rebuild::run`), which already
+            // does the same thing — without this, `.okf/config.toml`'s
+            // `[compiler].max_tokens` never reached MCP-triggered compiles.
+            let vault_options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+            let options = apply_arg_overrides(
+                vault_options,
+                args.temperature,
+                args.base_url_override,
+                args.concurrency,
+            );
             let diff_only = args.diff.unwrap_or(true);
             let output = Output::for_transport(transport);
             let mut report =
@@ -287,11 +304,16 @@ impl OkfServer {
         self.run_tool("okf-rebuild", async move {
             let vault_root = resolve_vault(args.vault.as_deref())?;
             let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
-            let options = CompileOptions {
-                temperature: args.temperature,
-                base_url_override: args.base_url_override,
-                ..Default::default()
-            };
+            // See the matching comment in `compile` above — same
+            // vault-config-first, args-override-second precedence as the
+            // CLI's `cli::rebuild::run`.
+            let vault_options = compiler::vault_provider_options(&vault_root, &model_spec)?;
+            let options = apply_arg_overrides(
+                vault_options,
+                args.temperature,
+                args.base_url_override,
+                args.concurrency,
+            );
             let diff_only = !args.force.unwrap_or(false);
             let output = Output::for_transport(transport);
             let mut report =
@@ -540,6 +562,28 @@ async fn apply_fix_if_requested(
     Ok((Some(mechanical), link_fix_report))
 }
 
+/// Merges an MCP tool call's explicit `temperature`/`base_url_override`/
+/// `concurrency` args on top of the vault-config-derived `options` — shared
+/// by `compile` and `rebuild`, which otherwise duplicated this exact
+/// precedence (vault config first, an explicit `Some` arg wins,
+/// `concurrency` defaults to `1` when not given). Pure and synchronous so
+/// the precedence itself can be unit-tested without a vault/LLM.
+fn apply_arg_overrides(
+    mut options: CompileOptions,
+    temperature: Option<f32>,
+    base_url_override: Option<String>,
+    concurrency: Option<usize>,
+) -> CompileOptions {
+    if temperature.is_some() {
+        options.temperature = temperature;
+    }
+    if base_url_override.is_some() {
+        options.base_url_override = base_url_override;
+    }
+    options.concurrency = concurrency.unwrap_or(1);
+    options
+}
+
 fn compile_report_to_json(
     report: &compiler::CompileReport,
     mechanical_fix: Option<&validator::FixReport>,
@@ -696,6 +740,65 @@ mod tests {
             config,
             Arc::new(Mutex::new(AuthManager::new(AuthMethod::Pat))),
         )
+    }
+
+    #[test]
+    fn apply_arg_overrides_passes_vault_options_through_unchanged_except_concurrency_defaults_to_one()
+     {
+        let vault_options = CompileOptions {
+            temperature: Some(0.2),
+            base_url_override: Some("https://vault.example/v1".to_string()),
+            api_key_env_override: Some("VAULT_KEY_ENV".to_string()),
+            max_tokens: Some(4096),
+            concurrency: 7, // not what vault_provider_options ever sets, but
+                            // proves this field is always overwritten below
+        };
+        let options = apply_arg_overrides(vault_options, None, None, None);
+        assert_eq!(options.temperature, Some(0.2));
+        assert_eq!(
+            options.base_url_override.as_deref(),
+            Some("https://vault.example/v1")
+        );
+        assert_eq!(
+            options.api_key_env_override.as_deref(),
+            Some("VAULT_KEY_ENV")
+        );
+        assert_eq!(options.max_tokens, Some(4096));
+        assert_eq!(options.concurrency, 1);
+    }
+
+    #[test]
+    fn apply_arg_overrides_lets_an_explicit_temperature_win_over_the_vault_derived_value() {
+        let vault_options = CompileOptions {
+            temperature: Some(0.2),
+            ..CompileOptions::default()
+        };
+        let options = apply_arg_overrides(vault_options, Some(0.9), None, None);
+        assert_eq!(options.temperature, Some(0.9));
+    }
+
+    #[test]
+    fn apply_arg_overrides_lets_an_explicit_base_url_override_win() {
+        let vault_options = CompileOptions {
+            base_url_override: Some("https://vault.example/v1".to_string()),
+            ..CompileOptions::default()
+        };
+        let options = apply_arg_overrides(
+            vault_options,
+            None,
+            Some("https://arg.example/v1".to_string()),
+            None,
+        );
+        assert_eq!(
+            options.base_url_override.as_deref(),
+            Some("https://arg.example/v1")
+        );
+    }
+
+    #[test]
+    fn apply_arg_overrides_uses_an_explicit_concurrency_value_instead_of_the_default() {
+        let options = apply_arg_overrides(CompileOptions::default(), None, None, Some(5));
+        assert_eq!(options.concurrency, 5);
     }
 
     #[test]

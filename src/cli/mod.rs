@@ -5,6 +5,7 @@
 
 pub mod compile;
 pub mod config;
+pub mod credentials;
 pub mod delete;
 pub mod ingest;
 pub mod lint;

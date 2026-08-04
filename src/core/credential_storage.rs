@@ -173,6 +173,41 @@ pub fn delete_credential(account: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Every account name this codebase could plausibly have written a
+/// credential under, given `config`'s current custom-provider setup: the
+/// fixed `"firecrawl"` account (`auth::auth_manager`'s own
+/// `CREDENTIAL_ACCOUNT` — note this is *not* a generic `"active-credentials"`
+/// blob, see that constant's own doc comment for why), `"llm-<provider>"`
+/// for every entry in `compiler::provider::KNOWN_PROVIDERS` except the
+/// `"custom"` sentinel (never itself a saved provider name — see
+/// `cli::setup_wizard`'s own `known_names` filter), and `"llm-<name>"` for
+/// every custom provider configured in `config.custom_providers`.
+///
+/// Pure and sync — no keychain/file I/O of its own — so `okf-mcp
+/// credentials list`/`clear` can enumerate/select accounts against a
+/// synthetic `Config` in tests, without ever touching the real OS
+/// keychain. Sorted and deduplicated for deterministic output, since
+/// `config.custom_providers` is a `HashMap` (unordered iteration) and a
+/// custom provider name could in principle collide with a known one.
+pub fn all_known_credential_accounts(config: &crate::core::config_schema::Config) -> Vec<String> {
+    let mut accounts = vec!["firecrawl".to_string()];
+    accounts.extend(
+        crate::compiler::provider::KNOWN_PROVIDERS
+            .iter()
+            .filter(|name| **name != "custom")
+            .map(|name| format!("llm-{name}")),
+    );
+    accounts.extend(
+        config
+            .custom_providers
+            .keys()
+            .map(|name| format!("llm-{name}")),
+    );
+    accounts.sort();
+    accounts.dedup();
+    accounts
+}
+
 /// Guards every test (in this file and in `config_manager`'s) that mutates
 /// the process-global `HOME` env var. `encryption_key()` derives its key
 /// from `resolve_home_dir()`, so without this lock, `cargo test`'s default
@@ -256,5 +291,58 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
         }
+    }
+
+    fn default_config() -> crate::core::config_schema::Config {
+        serde_json::from_value(serde_json::json!({}))
+            .expect("Config is constructible from an empty map — every field has a serde default")
+    }
+
+    #[test]
+    fn enumerates_firecrawl_known_providers_and_configured_custom_providers() {
+        let mut config = default_config();
+        config.custom_providers.insert(
+            "myvllm".to_string(),
+            crate::core::config_schema::CustomProviderEntry {
+                base_url: "https://myvllm.example/v1".to_string(),
+            },
+        );
+
+        let accounts = all_known_credential_accounts(&config);
+
+        assert!(accounts.contains(&"firecrawl".to_string()));
+        assert!(accounts.contains(&"llm-anthropic".to_string()));
+        assert!(accounts.contains(&"llm-ollama".to_string()));
+        assert!(accounts.contains(&"llm-myvllm".to_string()));
+        // "custom" is a sentinel used to reserve the name, never itself a
+        // saved provider account.
+        assert!(!accounts.contains(&"llm-custom".to_string()));
+    }
+
+    #[test]
+    fn contains_no_duplicates_even_if_a_custom_provider_reuses_a_known_name() {
+        // Shouldn't happen in practice — `setup_wizard`'s own
+        // `validate_custom_provider_name` rejects this collision at
+        // prompt-time — but the enumeration itself should still be safe
+        // if a config file were hand-edited to produce it anyway.
+        let mut config = default_config();
+        config.custom_providers.insert(
+            "anthropic".to_string(),
+            crate::core::config_schema::CustomProviderEntry::default(),
+        );
+
+        let accounts = all_known_credential_accounts(&config);
+        let occurrences = accounts.iter().filter(|a| *a == "llm-anthropic").count();
+        assert_eq!(occurrences, 1);
+    }
+
+    #[test]
+    fn an_empty_config_still_enumerates_the_fixed_and_known_static_accounts() {
+        let accounts = all_known_credential_accounts(&default_config());
+        assert!(accounts.contains(&"firecrawl".to_string()));
+        assert_eq!(
+            accounts.len(),
+            1 + crate::compiler::provider::KNOWN_PROVIDERS.len() - 1, // -1 for the "custom" sentinel
+        );
     }
 }
