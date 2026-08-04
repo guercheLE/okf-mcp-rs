@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-04
 
 ### Added
 - `--concurrency <N>` on `compile`/`rebuild` (and MCP tools `okf-compile`/`okf-rebuild`): compile that many sources in parallel. Opt-in, defaults to `1` (today's sequential behavior).
