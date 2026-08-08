@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-08-08
+
+### Added
+- `okf-synthesize-next`/`okf-synthesize-submit` MCP tools: an alternative to `okf-compile`/`okf-rebuild` that hands raw material to the calling MCP client's own LLM instead of driving a configured provider — no separate provider/API key needed. Batched by default (10 jobs/call), auto-transitions from compiling pending sources to fixing broken wikilinks to `"done"`. Preferred over `okf-compile`/`okf-rebuild` whenever the client already has a model in the loop.
+- `wiki/entities/` as a sibling to `wiki/concepts/`: concrete subjects (people, organizations, places, tools) now route to their own folder instead of everything living under `wiki/concepts/`, matching the convention used by comparable OKF-wiki implementations. Lint, search, `okf-read-concept`, the bundle summary, and pending-source detection all treat both directories as one content set.
+- The compiler's `type:` field is now an open, producer-chosen vocabulary (per the actual published OKF v0.2 spec) instead of hardcoded `"concept"` everywhere — search indexing's `doc_type` now reflects each document's real type instead of a fixed literal.
+
+### Changed
+- `okf_version` is no longer written into every compiled page's frontmatter — per spec it belongs only in the bundle-root `wiki/index.md`, which now declares it once. The non-spec `id:` field is no longer generated either (a document's ID is just its own file path); both are still accepted when present on content compiled before this change. `timestamp` is superseded by `generated: {by, at}`; `sources[]` entries can now carry `id`/`title` for footnote-style attribution.
+
 ## [0.9.1] - 2026-08-08
 
 ### Fixed
