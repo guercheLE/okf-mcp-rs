@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-08-08
+
+### Fixed
+- `claude-max-api-proxy`'s default base URL was `http://localhost:11434/v1` — Ollama's port, not the proxy's own (3456). With a real Ollama instance also running (the common case), requests silently landed on Ollama instead of the proxy, surfacing as a confusing "model not found" 404 instead of any indication of the wrong server. Now defaults to `http://localhost:3456/v1`.
+
 ## [0.9.0] - 2026-08-08
 
 ### Added
