@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-08-08
+
+### Added
+- `claude-max-api-proxy` LLM provider: routes `--model claude-max-api-proxy/<model>` at a local OpenAI-compatible proxy that serves requests through an already-authenticated `claude` CLI session (i.e. a Claude Pro/Max subscription instead of per-token API billing). No key needed; `CLAUDE_MAX_API_PROXY_ENDPOINT` overrides its default `http://localhost:11434/v1` for proxies left on their own default port (3456) or rebound elsewhere.
+
 ## [0.8.0] - 2026-08-04
 
 ### Added
