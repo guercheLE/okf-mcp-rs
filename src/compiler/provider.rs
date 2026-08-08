@@ -140,16 +140,22 @@ pub fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
         // the authenticated `claude` CLI, letting a Claude Pro/Max
         // *subscription* (not an API key) serve `--model` requests with no
         // per-token billing. No key needed: the proxy itself authenticates
-        // via the CLI's own logged-in session. Its documented default port
-        // is 3456, but the proxy is commonly rebound to 11434 to match
-        // Ollama's port for tools that hardcode it — either way the port is
-        // a local run-time choice, not something this crate can know in
-        // advance, so (like foundry-local) it's overridable via env var.
+        // via the CLI's own logged-in session. Defaults to the proxy's own
+        // documented port, 3456 — NOT 11434: that's Ollama's default port,
+        // and while the proxy *can* be rebound there, defaulting to it here
+        // would silently route requests into a real, already-running local
+        // Ollama instead (same host/port, same OpenAI-compatible shape, so
+        // the failure isn't a connection error — it's a confusing 404 model
+        // lookup against the wrong server). Confirmed against a real
+        // installed instance (`claude-max-api-proxy@1.0.0`, listening on
+        // 3456, models `claude-opus-4`/`claude-sonnet-4`/`claude-haiku-4`)
+        // sharing a machine with a real Ollama already bound to 11434.
+        // Overridable via env var for anyone who did rebind it.
         "claude-max-api-proxy" => ProviderSpec {
             adapter_kind: AdapterKind::OpenAI,
             api_key_env: None,
             base_url_env: Some("CLAUDE_MAX_API_PROXY_ENDPOINT"),
-            default_base_url: Some("http://localhost:11434/v1"),
+            default_base_url: Some("http://localhost:3456/v1"),
         },
         // Any other OpenAI-compatible endpoint (self-hosted vLLM, etc.) —
         // reuses the OpenAI adapter's wire protocol against a custom URL.
@@ -662,13 +668,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_max_api_proxy_default_base_url_matches_the_ollama_port_convention() {
-        // Pinned deliberately: the proxy's own documented default is 3456,
-        // but it's commonly rebound to 11434 (Ollama's port) — this
-        // provider's default follows that common setup, same reasoning as
-        // foundry-local having no hardcoded default at all (dynamic port).
+    fn claude_max_api_proxy_default_base_url_uses_its_own_documented_port_not_ollamas() {
+        // Regression guard: this default must NOT be 11434. That's Ollama's
+        // port — defaulting there would silently route requests into a real,
+        // already-running local Ollama instead of the proxy (same
+        // OpenAI-compatible shape, so it fails as a confusing 404 model
+        // lookup, not a connection error). Verified against a real installed
+        // `claude-max-api-proxy@1.0.0`, which listens on 3456 by default
+        // while a real Ollama instance held 11434 on the same machine.
         let spec = provider_spec("claude-max-api-proxy").unwrap();
-        assert_eq!(spec.default_base_url, Some("http://localhost:11434/v1"));
+        assert_eq!(spec.default_base_url, Some("http://localhost:3456/v1"));
         assert_eq!(spec.api_key_env, None);
         assert_eq!(spec.base_url_env, Some("CLAUDE_MAX_API_PROXY_ENDPOINT"));
     }
@@ -688,7 +697,7 @@ mod tests {
         let (adapter_kind, endpoint, auth) =
             resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
         assert_eq!(adapter_kind, AdapterKind::OpenAI);
-        assert_eq!(endpoint.base_url(), "http://localhost:11434/v1/");
+        assert_eq!(endpoint.base_url(), "http://localhost:3456/v1/");
         assert!(
             auth.single_key_value().is_ok(),
             "AuthData must resolve to a single value so the OpenAI adapter's \
@@ -696,13 +705,13 @@ mod tests {
         );
 
         // The env var exists specifically because the proxy's actual port is
-        // a local run-time choice (3456 default, 11434 when rebound to match
-        // Ollama, or anything else) — must be overridable like foundry-local.
+        // a local run-time choice — must be overridable like foundry-local,
+        // e.g. for anyone who did rebind it elsewhere.
         unsafe {
-            std::env::set_var("CLAUDE_MAX_API_PROXY_ENDPOINT", "http://localhost:3456/v1");
+            std::env::set_var("CLAUDE_MAX_API_PROXY_ENDPOINT", "http://localhost:9999/v1");
         }
         let (_, endpoint, _) = resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
-        assert_eq!(endpoint.base_url(), "http://localhost:3456/v1/");
+        assert_eq!(endpoint.base_url(), "http://localhost:9999/v1/");
         unsafe {
             std::env::remove_var("CLAUDE_MAX_API_PROXY_ENDPOINT");
         }
