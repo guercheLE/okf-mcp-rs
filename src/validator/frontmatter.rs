@@ -14,9 +14,19 @@ pub struct SourceRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiFrontmatter {
-    pub okf_version: String,
+    /// Per OKF v0.2 §12, `okf_version` belongs only in the bundle-root
+    /// `wiki/index.md`'s frontmatter, not on individual pages — no longer
+    /// written by the compiler, but still accepted (and preserved) here for
+    /// pages compiled before this change.
+    #[serde(default)]
+    pub okf_version: Option<String>,
     pub r#type: String,
-    pub id: String,
+    /// No longer written by the compiler — an OKF document's ID is just its
+    /// own file path minus `.md` (see `core::vault_resolver::wiki_content_dirs`
+    /// consumers' filename-stem fallback), not a frontmatter field. Still
+    /// accepted for pages compiled before this change.
+    #[serde(default)]
+    pub id: Option<String>,
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -89,10 +99,33 @@ mod tests {
     #[test]
     fn parses_a_well_formed_concept_page() {
         let parsed = parse_wiki_page(EXAMPLE).unwrap();
-        assert_eq!(parsed.frontmatter.id, "concept_microservices");
+        assert_eq!(
+            parsed.frontmatter.id.as_deref(),
+            Some("concept_microservices")
+        );
         assert_eq!(parsed.frontmatter.sources.len(), 1);
         assert_eq!(parsed.frontmatter.sources[0].resource, "/raw/raw_a1f94d.md");
         assert!(parsed.body.contains("[[api-gateway]]"));
+    }
+
+    #[test]
+    fn parses_a_page_with_neither_okf_version_nor_id_present() {
+        // The current, no-longer-optional-in-name-only shape the compiler
+        // actually writes since OKF v0.2 compliance: no per-page
+        // `okf_version` (that belongs only in the bundle-root index.md) and
+        // no `id:` (a document's ID is just its own file path).
+        let page = concat!(
+            "---\n",
+            "type: Person\n",
+            "title: \"Ada Lovelace\"\n",
+            "---\n",
+            "\n",
+            "# Ada Lovelace\n",
+        );
+        let parsed = parse_wiki_page(page).unwrap();
+        assert_eq!(parsed.frontmatter.okf_version, None);
+        assert_eq!(parsed.frontmatter.id, None);
+        assert_eq!(parsed.frontmatter.r#type, "Person");
     }
 
     #[test]

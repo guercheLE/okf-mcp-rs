@@ -11,6 +11,23 @@ use super::vault_registry::VaultRegistry;
 
 const VAULT_MARKER_DIR: &str = ".okf";
 
+/// The two sibling content directories that make up the published OKF
+/// bundle: `wiki/concepts/` for abstract ideas/processes/patterns, and
+/// `wiki/entities/` for concrete subjects (people, organizations, places,
+/// tools) — mirroring the convention used by comparable OKF-wiki
+/// implementations (e.g. `github.com/mchu1966/okf-wiki`). Neither the
+/// spec's own `type:` vocabulary nor its directory layout is centrally
+/// mandated, but every module that reads "the wiki" (lint, search indexing,
+/// `okf-read-concept`, the bundle summary, index generation, pending-source
+/// detection) must agree on the same two directories or content that lands
+/// in one gets silently invisible to logic still only looking at the other.
+pub fn wiki_content_dirs(vault_root: &Path) -> [PathBuf; 2] {
+    [
+        vault_root.join("wiki/concepts"),
+        vault_root.join("wiki/entities"),
+    ]
+}
+
 pub fn resolve_vault(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
     resolve_vault_with(explicit, &std::env::current_dir()?, &VaultRegistry::load()?)
 }
@@ -172,6 +189,16 @@ mod tests {
         assert_eq!(
             resolved,
             dir.path().canonicalize().unwrap().join("wiki/index.md")
+        );
+    }
+
+    #[test]
+    fn wiki_content_dirs_returns_the_concepts_and_entities_siblings() {
+        let root = Path::new("/vault");
+        let dirs = wiki_content_dirs(root);
+        assert_eq!(
+            dirs,
+            [root.join("wiki/concepts"), root.join("wiki/entities")]
         );
     }
 

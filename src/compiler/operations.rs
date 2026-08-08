@@ -5,11 +5,19 @@
 
 use std::path::{Path, PathBuf};
 
+use rmcp::schemars;
 use serde::Deserialize;
 
 use crate::core::vault_resolver::sandbox_path;
 
-#[derive(Debug, Deserialize, PartialEq)]
+// `schemars::JsonSchema` is derived (not just `Deserialize`) so this type
+// can be used directly as an `okf-synthesize-submit` MCP tool argument
+// (`core::mcp_server::SynthesizeSubmitResult`) — rmcp generates that tool's
+// JSON schema from its argument types, and validates/rejects a malformed
+// `operations` array before the tool body ever runs, instead of the tool
+// having to hand-parse a raw JSON string the way `parse_compile_payload`
+// does for the provider-driven compile path.
+#[derive(Debug, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "action")]
 pub enum CompileOperation {
     #[serde(rename = "CREATE_OR_UPDATE")]

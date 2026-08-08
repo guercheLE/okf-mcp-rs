@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::output::{Output, ProgressEvent};
 use crate::storage::fs_ops;
+use crate::validator::LintReport;
 use crate::validator::frontmatter::parse_wiki_page;
 use crate::validator::lint_bundle;
 
@@ -52,7 +53,7 @@ impl LinkFixReport {
     }
 }
 
-fn raw_ids_cited_by(pages: &[WikiPageRef]) -> HashSet<String> {
+pub(crate) fn raw_ids_cited_by(pages: &[WikiPageRef]) -> HashSet<String> {
     let mut ids = HashSet::new();
     for page in pages {
         if let Ok(parsed) = parse_wiki_page(&page.content) {
@@ -69,6 +70,18 @@ fn raw_ids_cited_by(pages: &[WikiPageRef]) -> HashSet<String> {
     ids
 }
 
+/// Groups a lint report's broken links by missing target slug — shared by
+/// `fix_broken_links` and `synthesize::next_batch`'s fix-phase, so both
+/// iterate the exact same set of missing-slug jobs in the same (sorted)
+/// order.
+pub(crate) fn group_broken_links_by_slug(lint: &LintReport) -> BTreeMap<String, Vec<String>> {
+    let mut by_slug: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (page, slug) in &lint.broken_links {
+        by_slug.entry(slug.clone()).or_default().push(page.clone());
+    }
+    by_slug
+}
+
 /// Finds every distinct broken-link target in the current lint report and
 /// attempts to synthesize a concept page for each, grounded only in the
 /// raw sources already cited by the pages that link to it.
@@ -79,11 +92,7 @@ pub async fn fix_broken_links(
     on_progress: Option<&Output>,
 ) -> anyhow::Result<LinkFixReport> {
     let lint = lint_bundle(vault_root)?;
-
-    let mut by_slug: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (page, slug) in &lint.broken_links {
-        by_slug.entry(slug.clone()).or_default().push(page.clone());
-    }
+    let by_slug = group_broken_links_by_slug(&lint);
 
     let driver = LLMCompilerDriver::new();
     let total = by_slug.len();

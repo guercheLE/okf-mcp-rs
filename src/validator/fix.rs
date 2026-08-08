@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::core::vault_resolver::wiki_content_dirs;
 use crate::storage::fs_ops;
 
 use super::frontmatter::parse_wiki_page;
@@ -36,17 +37,24 @@ impl FixReport {
 /// deliberate "surface as an error" design, not a silent skip), which
 /// would otherwise prevent this whole fix pass — including the unrelated
 /// missing-sources fix below — from running at all over the rest of the
-/// vault. This targets exactly one known, observed LLM-compiler typo:
-/// `tid:` emitted where the OKF v0.2 schema requires `id:` (`id` has no
-/// `#[serde(default)]`, so its absence alone fails the whole page's
-/// deserialization). Only touches pages that currently fail to parse, only
-/// rewrites the `tid:` line inside the frontmatter block (never the body),
-/// and verifies the rewrite actually fixes parsing before keeping it —
-/// otherwise the file is left untouched for a human/LLM to look at.
+/// vault. This targets one known, observed LLM-compiler typo: `tid:`
+/// emitted where `id:` was meant. `id` is now optional
+/// (`#[serde(default)]`), so this typo alone no longer breaks parsing on
+/// its own — this fix now mostly matters for older vaults compiled before
+/// that change, or a page that fails to parse for some other reason
+/// alongside the typo. Only touches pages that currently fail to parse,
+/// only rewrites the `tid:` line inside the frontmatter block (never the
+/// body), and verifies the rewrite actually fixes parsing before keeping
+/// it — otherwise the file is left untouched for a human/LLM to look at.
 fn fix_id_field_typos(vault_root: &Path) -> anyhow::Result<Vec<String>> {
     let mut fixed_pages = Vec::new();
 
-    for path in markdown_files_in(&vault_root.join("wiki/concepts"))? {
+    let mut content_paths = Vec::new();
+    for dir in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?);
+    }
+
+    for path in content_paths {
         let content = std::fs::read_to_string(&path)?;
         if parse_wiki_page(&content).is_ok() {
             continue; // already valid; not this class of bug
@@ -205,29 +213,27 @@ mod tests {
     }
 
     #[test]
-    fn fixes_a_tid_typo_so_the_page_parses_and_the_rest_of_the_vault_still_lints() {
+    fn a_tid_typo_alone_no_longer_needs_fixing_since_id_is_optional() {
+        // Regression guard for the OKF v0.2 compliance change that made
+        // `id:` optional: a `tid:` typo (missing the real `id:` field) used
+        // to break this page's parsing outright, which is what
+        // `fix_id_field_typos` existed to repair. Now the page parses fine
+        // on its own — `tid:` is just an ignored extra key — so there's
+        // nothing to fix, and the file must be left byte-for-byte untouched.
         let vault = tempfile::tempdir().unwrap();
         let dir = vault.path().join("wiki/concepts");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("bad.md"),
-            "---\nokf_version: \"0.2\"\ntype: concept\ntid: concept_bad\ntitle: \"bad\"\n---\n\n# bad\n",
-        )
-        .unwrap();
+        let original = "---\ntype: concept\ntid: concept_bad\ntitle: \"bad\"\n---\n\n# bad\n";
+        std::fs::write(dir.join("bad.md"), original).unwrap();
         write_concept(vault.path(), "a", &[], "");
 
         let (fix_report, post_fix) = fix_bundle(vault.path()).unwrap();
 
-        assert_eq!(
-            fix_report.fixed_frontmatter_typos,
-            vec!["wiki/concepts/bad.md".to_string()]
-        );
+        assert!(fix_report.fixed_frontmatter_typos.is_empty());
         assert!(!post_fix.has_errors());
 
         let content = std::fs::read_to_string(dir.join("bad.md")).unwrap();
-        assert!(parse_wiki_page(&content).is_ok());
-        assert!(content.contains("id: concept_bad"));
-        assert!(!content.contains("tid:"));
+        assert_eq!(content, original);
     }
 
     #[test]

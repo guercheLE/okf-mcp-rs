@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::core::output::{Output, ProgressEvent};
 use crate::core::vault_config::load_vault_config;
+use crate::core::vault_resolver::wiki_content_dirs;
 use crate::manifest::{self, Manifest};
 use crate::search::hybrid_search;
 use crate::storage::fs_ops;
@@ -174,7 +175,11 @@ pub async fn list_models(
 
 fn referenced_raw_ids(vault_root: &Path) -> anyhow::Result<HashSet<String>> {
     let mut ids = HashSet::new();
-    for path in markdown_files_in(&vault_root.join("wiki/concepts"))? {
+    let mut content_paths = Vec::new();
+    for dir in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?);
+    }
+    for path in content_paths {
         let content = std::fs::read_to_string(&path)?;
         if let Ok(parsed) = parse_wiki_page(&content) {
             for source in &parsed.frontmatter.sources {
@@ -198,7 +203,7 @@ fn referenced_raw_ids(vault_root: &Path) -> anyhow::Result<HashSet<String>> {
 /// authoritative "fully compiled at its current content" signal
 /// (`Manifest::is_compiled_at_current_hash`). Otherwise (a `rebuild
 /// --force`) every `ACTIVE` entry, regardless of either check.
-fn select_sources(
+pub(crate) fn select_sources(
     vault_root: &Path,
     manifest: &Manifest,
     diff_only: bool,
@@ -228,7 +233,7 @@ pub(crate) fn read_raw_body(vault_root: &Path, raw_id: &str) -> anyhow::Result<S
 /// The `SourceVersion` immediately before the currently-active one in
 /// `uri`'s history, if any — the "superseded previous source" the design's
 /// diff-synthesis flow (Q5) compares against.
-fn superseded_raw_id(manifest: &Manifest, uri: &str) -> Option<String> {
+pub(crate) fn superseded_raw_id(manifest: &Manifest, uri: &str) -> Option<String> {
     let history = &manifest.sources.get(uri)?.history;
     if history.len() < 2 {
         return None;
@@ -236,7 +241,7 @@ fn superseded_raw_id(manifest: &Manifest, uri: &str) -> Option<String> {
     Some(history[history.len() - 2].raw_id.clone())
 }
 
-async fn related_wiki_pages(
+pub(crate) async fn related_wiki_pages(
     vault_root: &Path,
     raw_content: &str,
 ) -> anyhow::Result<Vec<WikiPageRef>> {
@@ -522,10 +527,17 @@ where
 
 /// Deterministic table-of-contents regeneration: sorted by title, so
 /// re-running `compile` without any actual content change doesn't produce
-/// git diff noise from incidental ordering.
-fn regenerate_index(vault_root: &Path) -> anyhow::Result<()> {
+/// git diff noise from incidental ordering. Scans both `wiki/concepts/` and
+/// `wiki/entities/` so entity pages are listed too. Per OKF v0.2 §12, the
+/// bundle-root `index.md` is the *one* place `okf_version` belongs — no
+/// other key is added here.
+pub fn regenerate_index(vault_root: &Path) -> anyhow::Result<()> {
     let mut entries = Vec::new();
-    for path in markdown_files_in(&vault_root.join("wiki/concepts"))? {
+    let mut content_paths = Vec::new();
+    for dir in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?);
+    }
+    for path in content_paths {
         let content = std::fs::read_to_string(&path)?;
         if let Ok(parsed) = parse_wiki_page(&content) {
             let relative = path
@@ -542,7 +554,7 @@ fn regenerate_index(vault_root: &Path) -> anyhow::Result<()> {
     }
     entries.sort();
 
-    let mut markdown = String::from("# Wiki Index\n\n");
+    let mut markdown = String::from("---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n\n");
     for (title, path, description) in entries {
         if description.is_empty() {
             markdown.push_str(&format!("- [{title}]({path})\n"));
@@ -870,6 +882,27 @@ mod tests {
         std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
     }
 
+    // New-shape entity page: no `okf_version`/`id`, an open `type:` value,
+    // under `wiki/entities/` — proves the two-content-directory scan
+    // actually reads the second directory, not just the legacy one.
+    fn write_entity(vault_root: &Path, slug: &str, entity_type: &str, sources: &[&str]) {
+        let dir = vault_root.join("wiki/entities");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sources_yaml = if sources.is_empty() {
+            String::new()
+        } else {
+            let entries: String = sources
+                .iter()
+                .map(|s| format!("  - resource: \"{s}\"\n"))
+                .collect();
+            format!("sources:\n{entries}")
+        };
+        let content = format!(
+            "---\ntype: {entity_type}\ntitle: \"{slug}\"\ndescription: \"about {slug}\"\n{sources_yaml}---\n\n# {slug}\n"
+        );
+        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+    }
+
     #[test]
     fn select_sources_diff_only_skips_already_referenced_raw_ids() {
         let vault = tempfile::tempdir().unwrap();
@@ -879,6 +912,30 @@ mod tests {
         manifest.record_ingest("uri-b", "sha256:bbb", "raw_bbb", "t0");
 
         write_concept(vault.path(), "already-compiled", &["/raw/raw_aaa.md"]);
+
+        let selected = select_sources(vault.path(), &manifest, true).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].1, "raw_bbb");
+    }
+
+    #[test]
+    fn select_sources_diff_only_also_skips_a_raw_id_referenced_only_by_an_entity_page() {
+        // referenced_raw_ids' legacy-vault safety net must check
+        // wiki/entities/ too, not just wiki/concepts/ — otherwise a source
+        // whose only compiled output is an entity page looks unreferenced
+        // and gets needlessly recompiled.
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri-a", "sha256:aaa", "raw_aaa", "t0");
+        manifest.record_ingest("uri-b", "sha256:bbb", "raw_bbb", "t0");
+
+        write_entity(
+            vault.path(),
+            "already-compiled-entity",
+            "Person",
+            &["/raw/raw_aaa.md"],
+        );
 
         let selected = select_sources(vault.path(), &manifest, true).unwrap();
         assert_eq!(selected.len(), 1);
@@ -949,22 +1006,31 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         write_concept(vault.path(), "zebra", &[]);
         write_concept(vault.path(), "apple", &[]);
+        write_entity(vault.path(), "mango", "Person", &[]);
 
         regenerate_index(vault.path()).unwrap();
 
         let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
         let apple_pos = index.find("apple").unwrap();
+        let mango_pos = index.find("mango").unwrap();
         let zebra_pos = index.find("zebra").unwrap();
-        assert!(apple_pos < zebra_pos);
+        assert!(apple_pos < mango_pos);
+        assert!(mango_pos < zebra_pos);
         assert!(index.contains("about apple"));
+        assert!(index.contains("wiki/entities/mango.md"));
     }
 
     #[test]
-    fn regenerate_index_on_an_empty_wiki_produces_a_header_only_file() {
+    fn regenerate_index_declares_okf_version_in_its_own_frontmatter() {
+        // Per OKF v0.2 §12, the bundle-root index.md is the one place
+        // `okf_version` belongs — individual pages no longer carry it.
         let vault = tempfile::tempdir().unwrap();
         regenerate_index(vault.path()).unwrap();
         let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
-        assert_eq!(index.trim(), "# Wiki Index");
+        assert_eq!(
+            index.trim(),
+            "---\nokf_version: \"0.2\"\n---\n\n# Wiki Index"
+        );
     }
 
     #[test]
@@ -987,7 +1053,8 @@ mod tests {
         let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
         assert_eq!(
             index.trim(),
-            "# Wiki Index\n\n- [bare](wiki/concepts/bare.md)".trim()
+            "---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n\n- [bare](wiki/concepts/bare.md)"
+                .trim()
         );
         assert!(!index.contains("—"));
     }

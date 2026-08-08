@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::core::okf_schema::OKF_SCHEMA_VERSION;
-use crate::core::vault_resolver::sandbox_path;
+use crate::core::vault_resolver::{sandbox_path, wiki_content_dirs};
 use crate::manifest;
 use crate::validator::frontmatter::parse_wiki_page;
 use crate::validator::rules::markdown_files_in;
@@ -51,7 +51,11 @@ pub fn build_bundle(vault_root: &Path) -> anyhow::Result<Bundle> {
     raw_sources.sort_by(|a, b| a.uri.cmp(&b.uri));
 
     let mut concepts = Vec::new();
-    for path in markdown_files_in(&vault_root.join("wiki/concepts"))? {
+    let mut content_paths = Vec::new();
+    for dir in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?);
+    }
+    for path in content_paths {
         let content = std::fs::read_to_string(&path)?;
         let Ok(parsed) = parse_wiki_page(&content) else {
             continue;
@@ -68,8 +72,17 @@ pub fn build_bundle(vault_root: &Path) -> anyhow::Result<Bundle> {
             .map(|source| source.resource.clone())
             .collect();
         sources.sort();
+        // Legacy `id:` frontmatter field, if a page still carries one;
+        // otherwise the spec-correct fallback — the file's own path minus
+        // `.md`.
+        let id = parsed.frontmatter.id.unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default()
+                .to_string()
+        });
         concepts.push(BundleConcept {
-            id: parsed.frontmatter.id,
+            id,
             path: relative,
             title: parsed.frontmatter.title,
             sources,
@@ -141,6 +154,23 @@ mod tests {
             bundle.concepts[0].sources,
             vec!["/raw/raw_aaa.md".to_string()]
         );
+    }
+
+    #[test]
+    fn an_entity_page_with_no_id_field_gets_its_slug_derived_from_its_path() {
+        let vault = tempfile::tempdir().unwrap();
+        let dir = vault.path().join("wiki/entities");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("ada-lovelace.md"),
+            "---\ntype: Person\ntitle: \"Ada Lovelace\"\n---\n\n# Ada Lovelace\n",
+        )
+        .unwrap();
+
+        let bundle = build_bundle(vault.path()).unwrap();
+        assert_eq!(bundle.concepts.len(), 1);
+        assert_eq!(bundle.concepts[0].id, "ada-lovelace");
+        assert_eq!(bundle.concepts[0].path, "wiki/entities/ada-lovelace.md");
     }
 
     #[test]

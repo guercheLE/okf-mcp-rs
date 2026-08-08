@@ -111,8 +111,10 @@ Also note: `.okf/config.toml`'s `[compiler].max_tokens` (see [Configuration](#co
 | Tool | Args | Description |
 | --- | --- | --- |
 | `okf-ingest` | `source, tags?, vault?` | Fetch a URL or read a local file and add it to the vault's raw sources |
-| `okf-compile` | `diff?, model?, temperature?, base_url_override?, vault?` | Compile newly-ingested raw sources into wiki concept pages |
-| `okf-rebuild` | `force?, model?, temperature?, base_url_override?, vault?` | Recompile the wiki from all active raw sources |
+| `okf-compile` | `diff?, model?, temperature?, base_url_override?, vault?` | Compile newly-ingested raw sources into wiki concept/entity pages, via a configured LLM provider |
+| `okf-rebuild` | `force?, model?, temperature?, base_url_override?, vault?` | Recompile the wiki from all active raw sources, via a configured LLM provider |
+| `okf-synthesize-next` | `batch_size?, diff?, vault?` | Hand a batch of synthesis jobs to *your own* LLM (no provider needed) — see below |
+| `okf-synthesize-submit` | `results` | Submit synthesized results from `okf-synthesize-next` |
 | `okf-list-models` | `provider, vault?` | List a provider's available models |
 | `okf-lint` | `strict?, vault?` | Check wikilinks, frontmatter, and source provenance in the wiki |
 | `okf-reindex` | `embeddings?, vault?` | Rebuild the local text and vector index used by search |
@@ -121,6 +123,40 @@ Also note: `.okf/config.toml`'s `[compiler].max_tokens` (see [Configuration](#co
 | `okf-read-index` | `vault?` | Read the wiki's table-of-contents page |
 | `okf-read-concept` | `id_or_path, vault?` | Read a single compiled wiki concept page |
 | `okf-list-vaults` | — | List every vault registered on this machine |
+
+### Client-driven synthesis: `okf-synthesize-next` / `okf-synthesize-submit`
+
+`okf-compile`/`okf-rebuild` call an LLM *provider* themselves (`--model <provider>/<model>`, an API key). That's the right tool when you want a specific model/provider driving compilation, but it's a poor fit for routing through a subscription-CLI-backed provider for bulk automation — a CLI like `claude` is itself an agentic assistant with its own identity, and can (correctly) decline a system-prompt-driven "silently emit structured JSON" request as looking like a prompt injection, especially at volume.
+
+`okf-synthesize-next`/`okf-synthesize-submit` invert the flow instead: the server hands raw material to *you* — the calling MCP client's own model — and you submit the synthesized result back as an ordinary, user-authorized tool call. No separate provider or API key, no identity override, and it works with whatever model your MCP host already has. **Prefer this over `okf-compile`/`okf-rebuild`** whenever you're calling `okf-mcp` from an agent that has its own LLM.
+
+The loop:
+
+1. Call `okf-synthesize-next` (`batch_size` defaults to 10 — batched by default to cut down on round trips). The response has three parts:
+   - `phase`: `"compile"` (pending raw sources), `"fix"` (broken wikilinks, once nothing's left to compile), or `"done"`.
+   - `instructions`: the exact compiler system prompt — the rules for atomicity, the `wiki/concepts/` vs `wiki/entities/` split, the open `type:` vocabulary, provenance (`sources:`), etc.
+   - `jobs`: an array of `{job_id, kind, prompt}` — `prompt` is the same per-source (or per-missing-link) material `okf-compile` itself would send to an LLM.
+2. For each job, synthesize the `{"operations": [...]}` payload yourself, following `instructions` and `prompt`.
+3. Call `okf-synthesize-submit` with `{"results": [{"job_id": "...", "operations": [...]}, ...]}` — one entry per job, batched the same way. One entry failing (an expired `job_id`, an invalid path) doesn't fail the others; a failed entry stays available to retry.
+4. Repeat from step 1 until `phase` is `"done"`.
+
+```jsonc
+// okf-synthesize-next -> { "phase": "compile", "instructions": "...", "jobs": [
+//   { "job_id": "job-1", "kind": "compile", "prompt": "## 1. ACTIVE RAW SOURCE TO PROCESS\n..." }
+// ], "skipped": [], "remaining_estimate": 0 }
+
+// okf-synthesize-submit <- { "results": [{
+//   "job_id": "job-1",
+//   "operations": [{
+//     "action": "CREATE_OR_UPDATE",
+//     "path": "wiki/concepts/circuit-breakers.md",
+//     "content": "---\ntype: Pattern\ntitle: \"Circuit Breakers\"\nsources:\n  - resource: \"/raw/raw_a1f9.md\"\n---\n\n# Circuit Breakers\n..."
+//   }]
+// }] }
+// -> { "results": [{ "job_id": "job-1", "status": "applied", "touched_paths": ["wiki/concepts/circuit-breakers.md"] }] }
+```
+
+Jobs are held in memory per session (evicted after 30 minutes unpicked, or once 500 accumulate) — nothing is persisted until a matching `okf-synthesize-submit` call applies it.
 
 ### Connect an MCP client
 

@@ -7,6 +7,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::core::output::{Output, ProgressEvent};
+use crate::core::vault_resolver::wiki_content_dirs;
 use crate::ingest::frontmatter::hash_content;
 use crate::manifest;
 use crate::services::embedding_service::embed;
@@ -20,7 +21,7 @@ struct CollectedDocument {
     path: String,
     title: String,
     body: String,
-    doc_type: &'static str,
+    doc_type: String,
 }
 
 /// Shared with `compiler::driver`, which also needs "the body of a raw
@@ -79,12 +80,16 @@ fn collect_documents(vault_root: &Path) -> anyhow::Result<Vec<CollectedDocument>
                     title
                 },
                 body,
-                doc_type: "raw",
+                doc_type: "raw".to_string(),
             });
         }
     }
 
-    for path in markdown_files_in(&vault_root.join("wiki/concepts"))? {
+    let mut content_paths = Vec::new();
+    for dir in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?);
+    }
+    for path in content_paths {
         let content = std::fs::read_to_string(&path)?;
         let Ok(parsed) = crate::validator::frontmatter::parse_wiki_page(&content) else {
             // A page that fails `okf-mcp lint`'s own frontmatter check is
@@ -101,7 +106,11 @@ fn collect_documents(vault_root: &Path) -> anyhow::Result<Vec<CollectedDocument>
             path: relative,
             title: parsed.frontmatter.title,
             body: parsed.body,
-            doc_type: "concept",
+            // The document's own producer-chosen type (e.g. "Person",
+            // "API Endpoint"), not a hardcoded "concept" literal — OKF
+            // v0.2's `type:` is an open vocabulary, so search's doc_type
+            // facet must reflect whatever the compiler actually wrote.
+            doc_type: parsed.frontmatter.r#type,
         });
     }
 
@@ -133,7 +142,7 @@ pub fn reindex(
             path: &document.path,
             title: &document.title,
             body: &document.body,
-            doc_type: document.doc_type,
+            doc_type: &document.doc_type,
         })
         .collect();
     let text_documents_indexed = index::write_documents(&tantivy_index, &schema, &text_documents)?;
@@ -170,7 +179,7 @@ pub fn reindex(
             vectors::upsert_document_metadata(
                 &conn,
                 &document.path,
-                document.doc_type,
+                &document.doc_type,
                 &document.title,
                 &content_hash,
                 &chrono::Utc::now().to_rfc3339(),
@@ -293,6 +302,45 @@ mod tests {
             "---\nokf_version: \"0.2\"\ntype: concept\nid: concept_{slug}\ntitle: \"{title}\"\n---\n\n{body}\n"
         );
         std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+    }
+
+    fn write_entity_page(vault_root: &Path, slug: &str, entity_type: &str, title: &str) {
+        let dir = vault_root.join("wiki/entities");
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!("---\ntype: {entity_type}\ntitle: \"{title}\"\n---\n\nBody.\n");
+        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+    }
+
+    #[test]
+    fn collect_documents_uses_each_pages_own_type_not_a_hardcoded_concept_literal() {
+        let vault = tempfile::tempdir().unwrap();
+        write_wiki_page(vault.path(), "resiliency", "Resiliency", "Body.");
+        write_entity_page(vault.path(), "ada-lovelace", "Person", "Ada Lovelace");
+
+        let documents = collect_documents(vault.path()).unwrap();
+
+        let concept_doc = documents
+            .iter()
+            .find(|d| d.path == "wiki/concepts/resiliency.md")
+            .expect("concept page collected");
+        assert_eq!(concept_doc.doc_type, "concept");
+
+        let entity_doc = documents
+            .iter()
+            .find(|d| d.path == "wiki/entities/ada-lovelace.md")
+            .expect("entity page collected from the second content directory");
+        assert_eq!(entity_doc.doc_type, "Person");
+    }
+
+    #[test]
+    fn reindex_indexes_pages_from_both_content_directories() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        write_wiki_page(vault.path(), "resiliency", "Resiliency", "Body.");
+        write_entity_page(vault.path(), "ada-lovelace", "Person", "Ada Lovelace");
+
+        let report = reindex(vault.path(), false, None).unwrap();
+        assert_eq!(report.text_documents_indexed, 2);
     }
 
     #[test]

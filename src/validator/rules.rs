@@ -1,5 +1,6 @@
-//! `okf-mcp lint`: checks `./wiki/concepts/*.md` for dangling wikilinks,
-//! missing raw-source provenance, and orphan pages, per the design doc's
+//! `okf-mcp lint`: checks `./wiki/concepts/*.md` and `./wiki/entities/*.md`
+//! for dangling wikilinks, missing raw-source provenance, and orphan pages,
+//! per the design doc's
 //! Q1/Q2 validation table. (The design's fourth check, "Contradiction
 //! Flag," is something the *compiler* writes into a page's own
 //! `## Contradictions & Evolutions` section when it detects one — not a
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::core::vault_resolver::wiki_content_dirs;
 use crate::manifest;
 
 use super::frontmatter::parse_wiki_page;
@@ -74,7 +76,6 @@ pub(crate) fn markdown_files_in(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
-    let concepts_dir = vault_root.join("wiki/concepts");
     let mut report = LintReport::default();
 
     let manifest = manifest::store::load(vault_root)?;
@@ -88,7 +89,12 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
     let mut pages = Vec::new();
     let mut existing_slugs: HashSet<String> = HashSet::new();
 
-    for path in markdown_files_in(&concepts_dir)? {
+    let mut content_paths = Vec::new();
+    for dir in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?);
+    }
+
+    for path in content_paths {
         let relative_path = path
             .strip_prefix(vault_root)
             .unwrap_or(&path)
@@ -212,6 +218,34 @@ mod tests {
 
         let report = lint_bundle(vault.path()).unwrap();
         assert!(report.broken_links.is_empty());
+    }
+
+    fn write_entity(vault_root: &Path, slug: &str, body_extra: &str) {
+        let dir = vault_root.join("wiki/entities");
+        std::fs::create_dir_all(&dir).unwrap();
+        let content =
+            format!("---\ntype: Person\ntitle: \"{slug}\"\n---\n\n# {slug}\n\n{body_extra}\n");
+        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+    }
+
+    #[test]
+    fn a_link_from_a_concept_page_to_an_entity_page_is_not_broken() {
+        // A wikilink's target must resolve regardless of which of the two
+        // content directories it actually lives in.
+        let vault = tempfile::tempdir().unwrap();
+        write_concept(vault.path(), "a", &[], "See [[ada-lovelace]].");
+        write_entity(vault.path(), "ada-lovelace", "");
+
+        let report = lint_bundle(vault.path()).unwrap();
+        assert!(report.broken_links.is_empty());
+        // The entity page is linked to by "a", so it's not an orphan — "a"
+        // itself has nothing linking to it, so it legitimately is one;
+        // orphan detection is a separate check from broken-link resolution.
+        assert!(
+            !report
+                .orphan_pages
+                .contains(&"wiki/entities/ada-lovelace.md".to_string())
+        );
     }
 
     #[test]

@@ -17,46 +17,48 @@ pub struct WikiPageRef {
 
 pub const COMPILER_SYSTEM_PROMPT: &str = r#"You are the OKF LLM Compiler Engine, a knowledge-graph synthesis process that maintains a local Open Knowledge Format (OKF v0.2) wiki repository.
 
-Core Mission: read raw source documents from ./raw/ and synthesize them into clean, atomic, cross-linked Markdown concept documents inside ./wiki/concepts/.
+Core Mission: read raw source documents from ./raw/ and synthesize them into clean, atomic, cross-linked Markdown documents inside ./wiki/concepts/ (abstract ideas, processes, patterns, metrics) or ./wiki/entities/ (concrete subjects: people, organizations, places, tools, technologies) — whichever folder actually fits the subject.
 
 Compilation Rules:
 1. Source of Truth: read content exclusively from the active raw source(s) provided below.
-2. Atomicity: one concept per file. If a document introduces multiple major concepts, compile multiple distinct markdown files.
-3. Wikilinking Topology: use [[concept-slug]] notation for entities, technologies, or terms. Every link's slug must match a target file's slug (its filename without the .md extension) inside ./wiki/concepts/ — either an existing one, or a slug for a new concept you are creating in this same response.
-4. Strict Provenance: every output file's YAML frontmatter MUST declare its active raw sources under a `sources:` array, each entry shaped `{resource: "/raw/<raw_id>.md"}`.
-5. Conflict Resolution: if a new source contradicts an existing wiki concept, update that page with the newest state and record the conflict under a `## Contradictions & Evolutions` section, dated.
+2. Atomicity: one subject per file. If a document introduces multiple major concepts or entities, compile multiple distinct markdown files.
+3. Entities vs. Concepts: a concrete subject (a specific person, organization, place, tool, or technology) belongs in ./wiki/entities/<slug>.md; an abstract idea, process, pattern, or metric belongs in ./wiki/concepts/<slug>.md.
+4. Wikilinking Topology: use [[slug]] notation for cross-references. Every link's slug must match a target file's slug (its filename without the .md extension) in EITHER ./wiki/concepts/ or ./wiki/entities/ — either an existing one, or a slug for a new file you are creating in this same response. A reader following a link should never need to know or care which of the two folders its target lives in.
+5. Open Type Vocabulary: choose a `type:` value that specifically describes this document's subject — it is NOT a fixed enum. Examples for entities: Person, Organization, Place, Tool, Technology. Examples for concepts: Process, Pattern, Metric, Event, Reference. These are illustrative, not exhaustive — pick whatever value is most descriptive and self-explanatory for the actual content.
+6. Strict Provenance: every output file's YAML frontmatter MUST declare its active raw sources under a `sources:` array, each entry shaped `{resource: "/raw/<raw_id>.md", id: "<short stable key, e.g. s1>", title: "<short label>"}`. Where it aids traceability, cite specific claims in the body with a markdown footnote keyed to that source's `id` (e.g. `[^s1]`) — not required for every sentence, only where it meaningfully helps a reader verify a claim.
+7. Conflict Resolution: if a new source contradicts an existing wiki page, update that page with the newest state and record the conflict under a `## Contradictions & Evolutions` section, dated.
 
 Output Format Requirement: respond with exactly one valid JSON object, no prose before or after it, no markdown code fences:
 {"operations": [
   {"action": "CREATE_OR_UPDATE", "path": "wiki/concepts/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
-  {"action": "DELETE", "path": "wiki/concepts/<slug>.md", "reason": "<why this concept no longer has any active source>"}
+  {"action": "CREATE_OR_UPDATE", "path": "wiki/entities/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
+  {"action": "DELETE", "path": "wiki/concepts/<slug>.md", "reason": "<why this file no longer has any active source>"}
 ]}
 
-Concept page template:
+Page template (same shape for both ./wiki/concepts/ and ./wiki/entities/ — only the folder and `type:` value differ):
 ---
-okf_version: "0.2"
-type: concept
-id: concept_<slug>
+type: <descriptive type — see rule 5>
 title: "<Human Readable Title>"
 description: "<one sentence, used as an index/search preview>"
 sources:
   - resource: "/raw/<raw_id>.md"
+    id: "<short stable key>"
+    title: "<short label>"
 tags: [<tag1>, <tag2>]
-timestamp: "<ISO8601>"
+generated: { by: "okf-mcp-compiler", at: "<ISO8601>" }
 ---
 
 # <Title>
 
 <Executive summary>
 
-## Key Concepts & Architecture
-* Relates to [[other-concept]] for ...
+## Key Details
+* Relates to [[other-slug]] for ...
 
-## Technical Details
-<details>
+## Contradictions & Evolutions
+* **<ISO8601_DATE>**: Superseded [[previous-slug]] based on source `/raw/<new_raw_id>.md`.
 
-## Contradictions & Historical Diffs
-* **<ISO8601_DATE>**: Superseded [[previous-implementation]] based on source `/raw/<new_raw_id>.md`.
+Do NOT include an `okf_version:` or `id:` field — those don't belong on individual pages (okf_version is declared once, at the bundle root; a page's ID is just its own file path). Only add `status: draft` if this synthesis is genuinely uncertain or incomplete (omit it otherwise — stable is the default). Only add `stale_after: <YYYY-MM-DD>` if this content has an obvious, concrete expiry — most content won't, so omit it by default rather than guessing.
 "#;
 
 /// Assembles the three labeled sections from the design doc's Q5: the
@@ -122,9 +124,11 @@ pub fn build_link_fix_user_prompt(
     prompt.push_str("## 1. MISSING CONCEPT TO SYNTHESIZE\n");
     prompt.push_str(&format!(
         "The wiki graph contains one or more `[[{missing_slug}]]` wikilinks, but \
-         `wiki/concepts/{missing_slug}.md` does not exist. Create exactly that file \
+         neither `wiki/concepts/{missing_slug}.md` nor `wiki/entities/{missing_slug}.md` \
+         exists. Create exactly that one file, in whichever of the two folders fits the \
+         subject (see the entities-vs-concepts rule above) \
          (and, only if genuinely warranted by the source material, closely related \
-         concept files it should link to) — do not invent unrelated concepts.\n\n"
+         files it should link to) — do not invent unrelated content.\n\n"
     ));
 
     prompt.push_str("## 2. PAGES THAT LINK TO IT\n");
@@ -144,9 +148,9 @@ pub fn build_link_fix_user_prompt(
     }
 
     prompt.push_str(&format!(
-        "Synthesize wiki/concepts/{missing_slug}.md strictly from the raw sources above \
-         — the same provenance and atomicity rules as any other compile. Emit the JSON \
-         payload of operations."
+        "Synthesize {missing_slug}.md (in wiki/concepts/ or wiki/entities/, whichever fits) \
+         strictly from the raw sources above — the same provenance and atomicity rules as \
+         any other compile. Emit the JSON payload of operations."
     ));
     prompt
 }
@@ -218,16 +222,35 @@ mod tests {
         assert!(COMPILER_SYSTEM_PROMPT.contains("CREATE_OR_UPDATE"));
         assert!(COMPILER_SYSTEM_PROMPT.contains("DELETE"));
         assert!(
-            COMPILER_SYSTEM_PROMPT.contains("[[concept-slug]]")
-                || COMPILER_SYSTEM_PROMPT.contains("[[other-concept]]")
+            COMPILER_SYSTEM_PROMPT.contains("[[slug]]")
+                || COMPILER_SYSTEM_PROMPT.contains("[[other-slug]]")
         );
     }
 
     #[test]
-    fn the_link_fix_prompt_names_the_missing_slug_and_its_expected_path() {
+    fn the_system_prompt_routes_entities_and_concepts_to_separate_folders() {
+        assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/entities/"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/concepts/"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("Entities vs. Concepts"));
+    }
+
+    #[test]
+    fn the_system_prompt_declares_an_open_type_vocabulary_not_a_fixed_concept_value() {
+        assert!(COMPILER_SYSTEM_PROMPT.contains("Open Type Vocabulary"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("NOT a fixed enum"));
+        // The template no longer hardcodes `type: concept` or a per-page
+        // `okf_version`/`id` — both moved out (okf_version to the
+        // bundle-root index.md; id is derived from the file path).
+        assert!(!COMPILER_SYSTEM_PROMPT.contains("type: concept"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("Do NOT include an `okf_version:` or `id:` field"));
+    }
+
+    #[test]
+    fn the_link_fix_prompt_names_the_missing_slug_and_both_candidate_paths() {
         let prompt = build_link_fix_user_prompt("missing-concept", &[], &[]);
         assert!(prompt.contains("[[missing-concept]]"));
         assert!(prompt.contains("wiki/concepts/missing-concept.md"));
+        assert!(prompt.contains("wiki/entities/missing-concept.md"));
     }
 
     #[test]
