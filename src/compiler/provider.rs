@@ -28,6 +28,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "moonshot",
     "ollama",
     "foundry-local",
+    "claude-max-api-proxy",
     "custom",
 ];
 
@@ -133,6 +134,22 @@ pub fn provider_spec(provider: &str) -> anyhow::Result<ProviderSpec> {
             api_key_env: None,
             base_url_env: Some("FOUNDRY_LOCAL_ENDPOINT"),
             default_base_url: None,
+        },
+        // claude-max-api-proxy (github.com/sethschnrt/claude-max-api-proxy
+        // and forks) — a local OpenAI-compatible server that shells out to
+        // the authenticated `claude` CLI, letting a Claude Pro/Max
+        // *subscription* (not an API key) serve `--model` requests with no
+        // per-token billing. No key needed: the proxy itself authenticates
+        // via the CLI's own logged-in session. Its documented default port
+        // is 3456, but the proxy is commonly rebound to 11434 to match
+        // Ollama's port for tools that hardcode it — either way the port is
+        // a local run-time choice, not something this crate can know in
+        // advance, so (like foundry-local) it's overridable via env var.
+        "claude-max-api-proxy" => ProviderSpec {
+            adapter_kind: AdapterKind::OpenAI,
+            api_key_env: None,
+            base_url_env: Some("CLAUDE_MAX_API_PROXY_ENDPOINT"),
+            default_base_url: Some("http://localhost:11434/v1"),
         },
         // Any other OpenAI-compatible endpoint (self-hosted vLLM, etc.) —
         // reuses the OpenAI adapter's wire protocol against a custom URL.
@@ -641,6 +658,53 @@ mod tests {
         );
         unsafe {
             std::env::remove_var("FOUNDRY_LOCAL_ENDPOINT");
+        }
+    }
+
+    #[test]
+    fn claude_max_api_proxy_default_base_url_matches_the_ollama_port_convention() {
+        // Pinned deliberately: the proxy's own documented default is 3456,
+        // but it's commonly rebound to 11434 (Ollama's port) — this
+        // provider's default follows that common setup, same reasoning as
+        // foundry-local having no hardcoded default at all (dynamic port).
+        let spec = provider_spec("claude-max-api-proxy").unwrap();
+        assert_eq!(spec.default_base_url, Some("http://localhost:11434/v1"));
+        assert_eq!(spec.api_key_env, None);
+        assert_eq!(spec.base_url_env, Some("CLAUDE_MAX_API_PROXY_ENDPOINT"));
+    }
+
+    #[test]
+    fn resolve_provider_target_resolves_claude_max_api_proxy_default_and_override() {
+        // Combines the no-key-auth-resolves regression (same class as
+        // foundry-local's own test above: AdapterKind::OpenAI with no key
+        // must not resolve to AuthData::None, or every real request fails
+        // with ResolverAuthDataNotSingleValue) with the env-var-override
+        // check, in one test — both touch the same process-global env var,
+        // and cargo test runs tests concurrently by default, so splitting
+        // them into two tests would race on CLAUDE_MAX_API_PROXY_ENDPOINT.
+        unsafe {
+            std::env::remove_var("CLAUDE_MAX_API_PROXY_ENDPOINT");
+        }
+        let (adapter_kind, endpoint, auth) =
+            resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
+        assert_eq!(adapter_kind, AdapterKind::OpenAI);
+        assert_eq!(endpoint.base_url(), "http://localhost:11434/v1/");
+        assert!(
+            auth.single_key_value().is_ok(),
+            "AuthData must resolve to a single value so the OpenAI adapter's \
+             Authorization-header-building step doesn't error"
+        );
+
+        // The env var exists specifically because the proxy's actual port is
+        // a local run-time choice (3456 default, 11434 when rebound to match
+        // Ollama, or anything else) — must be overridable like foundry-local.
+        unsafe {
+            std::env::set_var("CLAUDE_MAX_API_PROXY_ENDPOINT", "http://localhost:3456/v1");
+        }
+        let (_, endpoint, _) = resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
+        assert_eq!(endpoint.base_url(), "http://localhost:3456/v1/");
+        unsafe {
+            std::env::remove_var("CLAUDE_MAX_API_PROXY_ENDPOINT");
         }
     }
 

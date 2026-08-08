@@ -105,7 +105,8 @@ pub struct RebuildArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ModelsArgs {
     /// anthropic, openai, groq, gemini, openrouter, deepseek, xai, together,
-    /// ollama-cloud, moonshot, ollama, or custom
+    /// ollama-cloud, moonshot, ollama, foundry-local, claude-max-api-proxy,
+    /// or custom
     pub provider: String,
     #[serde(default)]
     pub vault: Option<String>,

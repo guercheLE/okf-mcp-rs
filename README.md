@@ -164,6 +164,8 @@ Keep the listener on localhost unless you've added appropriate network access co
 | `OKF_MCP_FIRECRAWL_API_PAT` | Firecrawl personal access token — checked before the OS keychain/encrypted-file fallback `okf-mcp setup` writes to |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GROQ_API_KEY` / `GEMINI_API_KEY` / `OPEN_ROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `XAI_API_KEY` / `TOGETHER_API_KEY` / `OLLAMA_API_KEY` / `MOONSHOT_API_KEY` | LLM provider keys, read by whichever `<provider>/<model>` you pass to `--model` (`anthropic`, `openai`, `groq`, `gemini`, `openrouter`, `deepseek`, `xai`, `together`, `ollama-cloud`, `moonshot` respectively) |
 | `OLLAMA_HOST` | Overrides local Ollama's default `http://localhost:11434` (`ollama/<model>` — no key needed; distinct from `ollama-cloud/<model>`, which does) |
+| `FOUNDRY_LOCAL_ENDPOINT` | Microsoft Foundry Local's endpoint (`foundry-local/<model>` — no key needed; no hardcoded default since its port is assigned dynamically per machine) |
+| `CLAUDE_MAX_API_PROXY_ENDPOINT` | Overrides [`claude-max-api-proxy`](https://github.com/sethschnrt/claude-max-api-proxy)'s default `http://localhost:11434/v1` (`claude-max-api-proxy/<model>` — no key needed; a local OpenAI-compatible proxy that serves requests through an already-authenticated `claude` CLI session, i.e. your Claude Pro/Max subscription instead of per-token API billing) |
 | `CUSTOM_LLM_API_KEY` / `CUSTOM_LLM_BASE_URL` | For `custom/<model>` — any other OpenAI-compatible endpoint not listed above |
 | `OKF_MCP_LOG_LEVEL` | Log verbosity (`trace`/`debug`/`info`/`warn`/`error`) |
 | `FASTEMBED_CACHE_DIR` | Where the ~415 MiB local embedding model is cached (default `<home>/.okf-mcp/models`, absolute regardless of the invoking working directory) |

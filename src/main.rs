@@ -115,7 +115,8 @@ enum Command {
     /// List a provider's available models (e.g. before picking `--model`)
     Models {
         /// anthropic, openai, groq, gemini, openrouter, deepseek, xai,
-        /// together, ollama-cloud, moonshot, ollama, or custom
+        /// together, ollama-cloud, moonshot, ollama, foundry-local,
+        /// claude-max-api-proxy, or custom
         provider: String,
     },
     /// Check wikilinks, frontmatter, and source provenance in the wiki
