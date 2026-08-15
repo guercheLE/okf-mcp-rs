@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] - 2026-08-15
+
+### Fixed
+- Docker image build failed on 0.11.0: the builder stage copied only `src/`, but the binary now embeds `assets/explorer.html` and the vendored `3d-force-graph` bundle via `include_str!`. The Dockerfile now copies `assets/` too, so `Docker Build` / `Publish container image` succeed again.
+
 ## [0.11.0] - 2026-08-15
 
 ### Added
