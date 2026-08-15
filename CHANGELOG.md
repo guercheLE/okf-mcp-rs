@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.12.2] - 2026-08-15
+
+### Fixed
+- Explorer: filtering (kinds, hubs, tags…) left the surviving nodes where the *full* graph's forces had pushed them, so the picture went sparse. The force simulation is now reheated on every filter change, and a **⟲ Re-layout** button forgets positions and lays the visible graph out from scratch, fitting the camera once the layout settles.
+
 ## [0.12.1] - 2026-08-15
 
 ### Fixed
