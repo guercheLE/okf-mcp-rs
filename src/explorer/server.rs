@@ -29,7 +29,9 @@ use super::render::render_page;
 
 const EXPLORER_HTML: &str = include_str!("../../assets/explorer.html");
 const FORCE_GRAPH_JS: &str = include_str!("../../assets/vendor/3d-force-graph.min.js");
+const MERMAID_JS: &str = include_str!("../../assets/vendor/mermaid.min.js");
 const VENDOR_JS_ROUTE: &str = "/vendor/3d-force-graph.min.js";
+const MERMAID_JS_ROUTE: &str = "/vendor/mermaid.min.js";
 
 /// One running explorer. Dropping the handle does *not* stop the server —
 /// abort `task` for that (the CLI just awaits it until Ctrl-C; the MCP tool
@@ -108,6 +110,7 @@ pub fn build_router(
     let router = Router::new()
         .route("/", get(index_html))
         .route(VENDOR_JS_ROUTE, get(vendor_js))
+        .route(MERMAID_JS_ROUTE, get(mermaid_js))
         .route("/api/info", get(api_info))
         .route("/api/graph", get(api_graph))
         .route("/api/page/{*id}", get(api_page))
@@ -174,11 +177,14 @@ pub async fn serve(
     Ok(ExplorerHandle { addr, url, task })
 }
 
-async fn index_html() -> Html<&'static str> {
-    Html(EXPLORER_HTML)
+async fn index_html() -> Response {
+    // The page is versioned with the binary; never let a browser keep a
+    // stale copy across upgrades (the vendored JS below is immutable, this
+    // isn't).
+    ([(header::CACHE_CONTROL, "no-cache")], Html(EXPLORER_HTML)).into_response()
 }
 
-async fn vendor_js() -> Response {
+fn static_js(body: &'static str) -> Response {
     (
         [
             (
@@ -187,9 +193,17 @@ async fn vendor_js() -> Response {
             ),
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
-        FORCE_GRAPH_JS,
+        body,
     )
         .into_response()
+}
+
+async fn vendor_js() -> Response {
+    static_js(FORCE_GRAPH_JS)
+}
+
+async fn mermaid_js() -> Response {
+    static_js(MERMAID_JS)
 }
 
 fn error_json(status: StatusCode, err: impl std::fmt::Display) -> Response {
@@ -357,6 +371,8 @@ mod tests {
     fn embedded_assets_are_present() {
         assert!(EXPLORER_HTML.contains("<title>"));
         assert!(EXPLORER_HTML.contains(VENDOR_JS_ROUTE));
+        assert!(EXPLORER_HTML.contains(MERMAID_JS_ROUTE));
         assert!(FORCE_GRAPH_JS.contains("ForceGraph3D"));
+        assert!(MERMAID_JS.contains("mermaid"));
     }
 }

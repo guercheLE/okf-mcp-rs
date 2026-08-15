@@ -76,7 +76,10 @@ async fn index_and_vendor_assets_are_served() {
     assert!(html.contains("OKF Explorer"));
     assert!(html.contains("/vendor/3d-force-graph.min.js"));
 
-    let (status, _, content_type) = get(router, "/vendor/3d-force-graph.min.js").await;
+    let (status, _, content_type) = get(router.clone(), "/vendor/3d-force-graph.min.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content_type.starts_with("application/javascript"));
+    let (status, _, content_type) = get(router, "/vendor/mermaid.min.js").await;
     assert_eq!(status, StatusCode::OK);
     assert!(content_type.starts_with("application/javascript"));
 }
@@ -105,6 +108,12 @@ async fn info_and_graph_reflect_the_vault() {
     let reliability = nodes.iter().find(|n| n["id"] == "#reliability").unwrap();
     assert_eq!(reliability["in_degree"], 2);
     assert_eq!(reliability["hub_rank"], 1);
+    assert_eq!(reliability["degree"], 2);
+    // rate-limiting bridges everything: top betweenness, a cut vertex.
+    assert_eq!(rate["degree"], 5); // retry, circuit-breaker, #api, #reliability, raw (retry's backlink is the same neighbour)
+    assert_eq!(rate["betweenness"], 1.0);
+    assert_eq!(rate["articulation"], true);
+    assert_eq!(reliability["articulation"], false);
     let links = graph["links"].as_array().unwrap();
     assert!(links.iter().any(|l| l["source"] == "rate-limiting"
         && l["target"] == "raw:raw_abc"

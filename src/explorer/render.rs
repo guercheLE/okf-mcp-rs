@@ -235,6 +235,9 @@ pub fn render_page(vault_root: &Path, graph: &Graph, id: &str) -> anyhow::Result
                 in_degree: 0,
                 out_degree: 0,
                 hub_rank: 0,
+                degree: 0,
+                betweenness: 0.0,
+                articulation: false,
             };
             &uncited_raw
         }
@@ -349,6 +352,16 @@ mod tests {
         assert!(html.contains("<h1>T</h1>"));
         assert!(html.contains("<table>"));
         assert!(html.contains("footnote"));
+    }
+
+    #[test]
+    fn mermaid_fences_keep_their_language_class() {
+        let out = render("```mermaid\nflowchart LR\n  A --> B\n```\n", &[]);
+        assert!(
+            out.contains(r#"<pre><code class="language-mermaid">"#),
+            "{out}"
+        );
+        assert!(out.contains("A --&gt; B"), "{out}");
     }
 
     #[test]

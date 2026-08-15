@@ -45,9 +45,24 @@ pub struct GraphNode {
     pub path: Option<String>,
     pub in_degree: usize,
     pub out_degree: usize,
-    /// Dense rank by `in_degree`, descending: 1 = the biggest hub in the
-    /// vault (of any kind). Nodes with equal `in_degree` share a rank.
+    /// Dense rank by `in_degree`, descending: 1 = the most linked-to node in
+    /// the vault (of any kind). Nodes with equal `in_degree` share a rank.
     pub hub_rank: usize,
+    /// Number of distinct neighbours, direction ignored (what Obsidian sizes
+    /// nodes by).
+    pub degree: usize,
+    /// Betweenness centrality on the undirected graph, normalised to
+    /// `0.0..=1.0` (1.0 = the vault's top bridge). *This* is the measure of
+    /// "glue": how many shortest paths between other nodes run through this
+    /// one — the nodes whose removal actually splits the graph into islands,
+    /// which neither in- nor out-degree reliably identifies (a tag linked
+    /// from 40 pages of one cluster has a huge in-degree but bridges
+    /// nothing). Sampled (Brandes with pivots) above `BETWEENNESS_EXACT_MAX`
+    /// nodes so big vaults stay fast.
+    pub betweenness: f64,
+    /// Articulation point: removing this node alone disconnects its
+    /// component (Tarjan). The strictest kind of hub.
+    pub articulation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
@@ -163,6 +178,157 @@ struct PendingNode {
     description: Option<String>,
     tags: Vec<String>,
     path: Option<String>,
+}
+
+/// Above this many nodes betweenness is estimated from a fixed sample of
+/// pivot sources instead of every node (Brandes' algorithm is O(V·E) exact).
+const BETWEENNESS_EXACT_MAX: usize = 4000;
+const BETWEENNESS_PIVOTS: usize = 1500;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StructuralMetrics {
+    degree: usize,
+    betweenness: f64,
+    articulation: bool,
+}
+
+/// Undirected degree, normalised betweenness centrality (Brandes 2001) and
+/// articulation points (Tarjan) for every node. `ids` fixes the node
+/// numbering; `links` are treated as undirected and de-duplicated.
+fn structural_metrics<'a>(
+    ids: &[&'a str],
+    links: &HashSet<GraphLink>,
+) -> HashMap<&'a str, StructuralMetrics> {
+    let n = ids.len();
+    let index: HashMap<&str, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for link in links {
+        let (Some(&a), Some(&b)) = (
+            index.get(link.source.as_str()),
+            index.get(link.target.as_str()),
+        ) else {
+            continue;
+        };
+        if a != b {
+            adjacency[a].push(b);
+            adjacency[b].push(a);
+        }
+    }
+    for list in &mut adjacency {
+        list.sort_unstable();
+        list.dedup();
+    }
+
+    // Brandes: accumulate pair-dependencies from each source's BFS DAG.
+    let mut betweenness = vec![0.0f64; n];
+    let sources: Vec<usize> = if n <= BETWEENNESS_EXACT_MAX {
+        (0..n).collect()
+    } else {
+        // Deterministic stride sample — no RNG dependency, reproducible.
+        let stride = n.div_ceil(BETWEENNESS_PIVOTS).max(1);
+        (0..n).step_by(stride).collect()
+    };
+    let mut sigma = vec![0.0f64; n];
+    let mut dist = vec![usize::MAX; n];
+    let mut delta = vec![0.0f64; n];
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for &s in &sources {
+        for i in 0..n {
+            sigma[i] = 0.0;
+            dist[i] = usize::MAX;
+            delta[i] = 0.0;
+            predecessors[i].clear();
+        }
+        order.clear();
+        sigma[s] = 1.0;
+        dist[s] = 0;
+        queue.push_back(s);
+        while let Some(v) = queue.pop_front() {
+            order.push(v);
+            for &w in &adjacency[v] {
+                if dist[w] == usize::MAX {
+                    dist[w] = dist[v] + 1;
+                    queue.push_back(w);
+                }
+                if dist[w] == dist[v] + 1 {
+                    sigma[w] += sigma[v];
+                    predecessors[w].push(v);
+                }
+            }
+        }
+        while let Some(w) = order.pop() {
+            for &v in &predecessors[w] {
+                delta[v] += sigma[v] / sigma[w] * (1.0 + delta[w]);
+            }
+            if w != s {
+                betweenness[w] += delta[w];
+            }
+        }
+    }
+    let max = betweenness.iter().copied().fold(0.0f64, f64::max);
+    if max > 0.0 {
+        for b in &mut betweenness {
+            *b /= max;
+        }
+    }
+
+    // Tarjan articulation points, iterative to be safe on deep graphs.
+    let mut articulation = vec![false; n];
+    let mut disc = vec![usize::MAX; n];
+    let mut low = vec![0usize; n];
+    let mut time = 0usize;
+    for root in 0..n {
+        if disc[root] != usize::MAX {
+            continue;
+        }
+        let mut root_children = 0usize;
+        // stack of (node, parent, next-neighbour-index)
+        let mut stack: Vec<(usize, usize, usize)> = vec![(root, usize::MAX, 0)];
+        disc[root] = time;
+        low[root] = time;
+        time += 1;
+        while let Some(&mut (v, parent, ref mut next)) = stack.last_mut() {
+            if *next < adjacency[v].len() {
+                let w = adjacency[v][*next];
+                *next += 1;
+                if disc[w] == usize::MAX {
+                    disc[w] = time;
+                    low[w] = time;
+                    time += 1;
+                    stack.push((w, v, 0));
+                } else if w != parent {
+                    low[v] = low[v].min(disc[w]);
+                }
+            } else {
+                stack.pop();
+                if let Some(&(p, _, _)) = stack.last() {
+                    low[p] = low[p].min(low[v]);
+                    if p == root {
+                        root_children += 1;
+                    } else if low[v] >= disc[p] {
+                        articulation[p] = true;
+                    }
+                }
+            }
+        }
+        articulation[root] = root_children > 1;
+    }
+
+    ids.iter()
+        .enumerate()
+        .map(|(i, id)| {
+            (
+                *id,
+                StructuralMetrics {
+                    degree: adjacency[i].len(),
+                    betweenness: betweenness[i],
+                    articulation: articulation[i],
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn build_graph(vault_root: &Path) -> anyhow::Result<Graph> {
@@ -340,7 +506,14 @@ pub fn build_graph(vault_root: &Path) -> anyhow::Result<Graph> {
         }
     }
 
-    // Degrees + hub rank.
+    // Degrees, hub rank, and the structural measures.
+    let structure: HashMap<String, StructuralMetrics> = {
+        let ids: Vec<&str> = nodes.keys().map(String::as_str).collect();
+        structural_metrics(&ids, &links)
+            .into_iter()
+            .map(|(id, m)| (id.to_string(), m))
+            .collect()
+    };
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
     let mut out_degree: HashMap<&str, usize> = HashMap::new();
     for link in &links {
@@ -361,10 +534,14 @@ pub fn build_graph(vault_root: &Path) -> anyhow::Result<Graph> {
         .into_iter()
         .map(|(id, pending)| {
             let ind = in_degree.get(id.as_str()).copied().unwrap_or(0);
+            let metrics = structure.get(id.as_str()).copied().unwrap_or_default();
             GraphNode {
                 hub_rank: rank_of[&ind],
                 in_degree: ind,
                 out_degree: out_degree.get(id.as_str()).copied().unwrap_or(0),
+                degree: metrics.degree,
+                betweenness: metrics.betweenness,
+                articulation: metrics.articulation,
                 id,
                 title: pending.title,
                 kind: pending.kind,
@@ -547,6 +724,63 @@ mod tests {
             .map(|n| n.id.as_str())
             .collect();
         assert_eq!(outlinks, vec!["#travel", "alpha"]);
+    }
+
+    #[test]
+    fn structural_metrics_find_bridges_not_just_popular_nodes() {
+        // Two triangles {a,b,c} and {d,e,f} joined only through `bridge`:
+        //   a-b, b-c, c-a, c-bridge, bridge-d, d-e, e-f, f-d
+        // plus a "popular" leaf hub `tag` linked from a, b, c (in-degree 3,
+        // but bridging nothing).
+        let ids = ["a", "b", "c", "bridge", "d", "e", "f", "tag"];
+        let mut links = HashSet::new();
+        for (s, t) in [
+            ("a", "b"),
+            ("b", "c"),
+            ("c", "a"),
+            ("c", "bridge"),
+            ("bridge", "d"),
+            ("d", "e"),
+            ("e", "f"),
+            ("f", "d"),
+            ("a", "tag"),
+            ("b", "tag"),
+            ("c", "tag"),
+        ] {
+            links.insert(GraphLink {
+                source: s.to_string(),
+                target: t.to_string(),
+                kind: "wikilink",
+            });
+        }
+        let m = structural_metrics(&ids, &links);
+        assert_eq!(m["tag"].degree, 3);
+        assert_eq!(m["c"].degree, 4);
+        assert_eq!(m["bridge"].degree, 2);
+        // The bridge (and its two anchors) are articulation points; the tag is not.
+        assert!(m["bridge"].articulation);
+        assert!(m["c"].articulation);
+        assert!(m["d"].articulation);
+        assert!(!m["tag"].articulation);
+        assert!(!m["a"].articulation);
+        // Betweenness ranks the bridge/anchors far above the popular tag.
+        assert!(m["bridge"].betweenness > 0.9, "{:?}", m["bridge"]);
+        assert!(m["c"].betweenness > m["tag"].betweenness);
+        assert_eq!(m["tag"].betweenness, 0.0);
+        let top = m.values().map(|x| x.betweenness).fold(0.0, f64::max);
+        assert!((top - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn graph_nodes_carry_structural_metrics() {
+        let dir = sample_vault();
+        let graph = build_graph(dir.path()).unwrap();
+        let alpha = graph.node("alpha").unwrap();
+        // alpha ↔ beta, gamma, broken, other::thing, #travel, #ai, raw:raw_abc
+        assert_eq!(alpha.degree, 7);
+        assert!(alpha.betweenness > 0.99, "{}", alpha.betweenness);
+        assert!(alpha.articulation);
+        assert!(!graph.node("#ai").unwrap().articulation);
     }
 
     #[test]

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Explorer hub detection that actually finds the glue: `explorer::graph` now computes undirected `degree`, normalised **betweenness centrality** (Brandes; sampled pivots above 4000 nodes) and **articulation points** (Tarjan) per node, and the UI recomputes betweenness plus **Louvain communities** on the *visible* graph. The hub metric is selectable — bridging, cross-cluster links, connections, inbound only, cut vertices — with "hide top N hubs", island/isolated counts, colour by community or by island, and a one-click **✨ Reveal clusters** preset. (In-degree alone ranked popular tags/pages that bridge nothing, so hiding them produced no islands.)
+- Mermaid diagrams: ```` ```mermaid ```` fences render in the note pane (vendored `mermaid.min.js` 11.16, `securityLevel: strict`), following the light/dark theme.
+
+### Changed
+- Legend/kind label "notes" is now "concepts" (they are exactly the `wiki/concepts/` pages).
+- Node size follows the chosen hub metric, normalised so the top node is ~3.5× the smallest; direction particles are larger and highlighted so the toggle is visible.
+- "Show only hubs" picks a sensible top-N when none is set instead of showing an empty graph; the explorer page is served with `Cache-Control: no-cache` so upgrades never leave a stale UI in the browser.
+
 ## [0.11.1] - 2026-08-15
 
 ### Fixed

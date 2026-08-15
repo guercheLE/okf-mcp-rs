@@ -79,6 +79,7 @@
   #note .body table { border-collapse: collapse; } #note .body td, #note .body th { border: 1px solid var(--line); padding: 3px 6px; }
   #note .body blockquote { border-left: 3px solid var(--line); margin: 0; padding-left: 10px; color: var(--fg2); }
   #note .body img { max-width: 100%; }
+  #note .body .mermaid-diagram { margin: 10px 0; overflow-x: auto; } #note .body .mermaid-diagram svg { max-width: 100%; height: auto; }
   a.wikilink { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
   a.wikilink.missing { color: var(--fg2); border-bottom-style: dashed; }
   #note .links .item { padding: 3px 6px; }
@@ -113,6 +114,7 @@
     <div id="showing"></div>
     <div id="toolbar">
       <button class="icon" id="btnFit" title="Fit all visible nodes">⤢ Fit</button>
+      <button class="icon" id="btnReveal" title="Hide tag / raw / unresolved nodes, rank hubs by cross-cluster links, hide the top 30, colour by community">✨ Reveal clusters</button>
       <button class="icon" id="btnFilters" title="Filters">⚙ Filters</button>
     </div>
     <div id="filters" class="hidden">
@@ -120,15 +122,25 @@
       <div class="field"><input type="text" id="fText" placeholder="title, slug, type or tag contains…"></div>
 
       <h3>Hubs</h3>
-      <div class="field small muted">Node size = inbound links. Hide the biggest hubs (of <em>any</em> kind) to reveal the islands and clusters they glue together.</div>
       <div class="field">
-        <div class="row"><span>Hide hubs with in-degree ≥ <b id="hubThreshVal"></b></span><span class="grow"></span><button class="icon small" id="hubReset">reset</button></div>
-        <input type="range" id="hubThresh" min="1" max="2" step="1">
+        <div class="small muted">Rank hubs (and size nodes) by</div>
+        <select id="hubMetric" style="width:100%">
+          <option value="betweenness">bridging (betweenness centrality on the visible graph)</option>
+          <option value="cross">cross-cluster links (edges into other communities)</option>
+          <option value="degree">connections (in + out links, like Obsidian)</option>
+          <option value="in_degree">inbound links only</option>
+          <option value="articulation">cut vertices only (removing one splits its component)</option>
+        </select>
+        <div class="small muted" id="hubMetricHelp" style="margin-top:4px"></div>
+      </div>
+      <div class="field">
+        <div class="row"><span>Hide top <b id="hubTopVal">0</b> hubs</span><span class="grow"></span><button class="icon small" id="hubReset">reset</button></div>
+        <input type="range" id="hubTop" min="0" max="100" step="1" value="0">
         <div class="small muted" id="hubCount"></div>
       </div>
       <div class="field small">
         Apply hub filter to:
-        <label class="inline"><input type="checkbox" class="hubKind" value="concept" checked>notes</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="concept" checked>concepts</label>
         <label class="inline"><input type="checkbox" class="hubKind" value="entity" checked>entities</label>
         <label class="inline"><input type="checkbox" class="hubKind" value="tag" checked>tags</label>
         <label class="inline"><input type="checkbox" class="hubKind" value="raw" checked>raw</label>
@@ -137,9 +149,17 @@
       </div>
       <div class="field">
         <label class="inline"><input type="checkbox" id="onlyHubs">Show only hubs (invert)</label>
-        <label class="inline"><input type="checkbox" id="clusterColor">Color by cluster</label>
       </div>
-      <details><summary class="small">Top hubs (click to hide/show, ⌖ to jump)</summary><div id="hublist" class="list small"></div></details>
+      <div class="field">
+        <div class="small muted">Colour nodes by</div>
+        <select id="colorBy" style="width:100%">
+          <option value="kind">kind (concept / entity / tag / …)</option>
+          <option value="community">community (Louvain clusters — works even while everything is still connected)</option>
+          <option value="island">island (connected component after hiding hubs)</option>
+        </select>
+      </div>
+      <div class="field"><button id="revealClusters" title="Hide tag / raw / unresolved nodes, rank hubs by cross-cluster links, hide the top 30, colour by community">✨ Reveal clusters preset</button> <span class="small muted" id="structStatus"></span></div>
+      <details><summary class="small">Top hubs by this metric (click to hide/show, ⌖ to jump; ✂ = cut vertex)</summary><div id="hublist" class="list small"></div></details>
 
       <h3>Show</h3>
       <div class="field">
@@ -157,7 +177,7 @@
       <h3>Forces</h3>
       <div class="field"><div class="small">Repulsion <b id="chargeVal"></b></div><input type="range" id="charge" min="5" max="300" value="60"></div>
       <div class="field"><div class="small">Link distance <b id="linkDistVal"></b></div><input type="range" id="linkDist" min="5" max="150" value="30"></div>
-      <div class="field"><label class="inline"><input type="checkbox" id="particles">Link particles</label></div>
+      <div class="field"><label class="inline" title="Animated dots travelling along each link from source to target — shows link direction"><input type="checkbox" id="particles">Direction particles (source → target)</label></div>
     </div>
     <div id="legend"></div>
     <div id="toast"></div>
@@ -169,12 +189,13 @@
 </div>
 
 <script src="/vendor/3d-force-graph.min.js"></script>
+<script src="/vendor/mermaid.min.js"></script>
 <script>
 (() => {
   'use strict';
   const $ = (s) => document.querySelector(s);
   const KINDS = ['concept', 'entity', 'tag', 'raw', 'cross_vault', 'missing'];
-  const KIND_LABEL = { concept: 'notes', entity: 'entities', tag: 'tags', raw: 'raw sources', cross_vault: 'cross-vault', missing: 'unresolved' };
+  const KIND_LABEL = { concept: 'concepts', entity: 'entities', tag: 'tags', raw: 'raw sources', cross_vault: 'cross-vault', missing: 'unresolved' };
   const CLUSTER_PALETTE = ['#e6194b','#3cb44b','#ffe119','#4363d8','#f58231','#911eb4','#42d4f4','#f032e6','#bfef45','#fabed4','#469990','#dcbeff','#9a6324','#fffac8','#800000','#aaffc3','#808000','#ffd8b1','#000075','#a9a9a9'];
 
   const state = {
@@ -182,12 +203,17 @@
     byId: new Map(),
     neighbors: new Map(),   // id -> Set(id)
     visibleKinds: new Set(KINDS),
-    hubThresh: Infinity,
+    hubMetric: 'betweenness',
+    hubTop: 0,
+    hubSet: new Set(),         // ids currently counted as hubs (top-N by metric, within hubKinds)
     hubKinds: new Set(KINDS),
     manualHidden: new Set(),
     manualShown: new Set(),    // hubs the user un-hid individually despite the threshold
     onlyHubs: false,
-    clusterColor: false,
+    colorBy: 'kind',
+    struct: null,
+    metricMax: 0,          // { key, betweenness: Map, community: Map, cross: Map, communityCount } for the current base-visible graph
+
     orphans: false,
     depth: 0,
     text: '',
@@ -214,15 +240,17 @@
   const Graph = ForceGraph3D()($('#graph'))
     .nodeId('id')
     .nodeRelSize(3.2)
-    .nodeVal(n => Math.pow(1 + n.in_degree, 1.5))
+    .nodeVal(nodeVal)
     .nodeOpacity(0.95)
-    .nodeLabel(n => `<div style="background:${css('--bg2')};color:${css('--fg')};padding:4px 8px;border-radius:6px;border:1px solid ${css('--line')};font:12px sans-serif"><b>${esc(n.title)}</b><br><span style="opacity:.7">${n.kind}${n.type ? ' · ' + esc(n.type) : ''} · in ${n.in_degree} · out ${n.out_degree} · hub #${n.hub_rank}</span></div>`)
+    .nodeLabel(n => `<div style="background:${css('--bg2')};color:${css('--fg')};padding:4px 8px;border-radius:6px;border:1px solid ${css('--line')};font:12px sans-serif"><b>${esc(n.title)}</b><br><span style="opacity:.7">${n.kind}${n.type ? ' · ' + esc(n.type) : ''} · in ${n.in_degree} · out ${n.out_degree} · bridging ${(n.betweenness * 100).toFixed(1)}%${n.articulation ? ' · ✂ cut vertex' : ''}</span></div>`)
     .nodeColor(nodeColor)
     .linkColor(linkColor)
     .linkOpacity(0.35)
     .linkWidth(l => isLinkHot(l) ? 1.2 : 0)
     .linkDirectionalParticles(0)
-    .linkDirectionalParticleWidth(1.2)
+    .linkDirectionalParticleWidth(2.5)
+    .linkDirectionalParticleSpeed(0.006)
+    .linkDirectionalParticleColor(() => css('--sel'))
     .onNodeClick(n => openNode(n.id))
     .onNodeRightClick(n => flyTo(n))
     .onNodeHover(n => { state.hover = n || null; repaint(); })
@@ -249,8 +277,9 @@
     return focus && (s === focus || t === focus);
   }
   function nodeColor(n) {
-    let base = state.clusterColor ? (CLUSTER_PALETTE[state.clusterOf.get(n.id) % CLUSTER_PALETTE.length] || kindColor(n.kind)) : kindColor(n.kind);
-    if (state.clusterColor && state.clusterOf.get(n.id) === -1) base = kindColor('missing');
+    let base = kindColor(n.kind);
+    if (state.colorBy === 'island') { const c = state.clusterOf.get(n.id); if (c >= 0) base = CLUSTER_PALETTE[c % CLUSTER_PALETTE.length]; else if (c === -1) base = kindColor('missing'); }
+    else if (state.colorBy === 'community' && state.struct && state.struct.community.has(n.id)) base = CLUSTER_PALETTE[state.struct.community.get(n.id) % CLUSTER_PALETTE.length];
     const bg = css('--graph-bg');
     if (n.id === state.selected) return css('--sel');
     const hot = isNodeHot(n);
@@ -273,15 +302,108 @@
   }
 
   // ---------- Filtering ----------
-  function maxInDegree() { return state.graph.nodes.reduce((m, n) => Math.max(m, n.in_degree), 0); }
-  function isHub(n) { return state.hubKinds.has(n.kind) && n.in_degree >= state.hubThresh; }
-  function baseVisible(n) {
-    if (!state.visibleKinds.has(n.kind)) return false;
-    if (state.manualHidden.has(n.id)) return false;
-    if (!state.manualShown.has(n.id)) {
-      const hub = isHub(n);
-      if (state.onlyHubs ? !hub && state.hubKinds.has(n.kind) : hub) return false;
+  const METRIC_HELP = {
+    betweenness: 'Share of shortest paths between other visible nodes that pass through this one (recomputed for the nodes currently shown, so hiding tags changes it). High = a bridge.',
+    cross: 'Number of links a node has into communities other than its own (Louvain on the visible graph). The nodes that stitch clusters together — hiding them separates the clusters.',
+    degree: 'Distinct neighbours, direction ignored. Big MOC/index pages and popular tags rank high; they may or may not be bridges.',
+    in_degree: 'How many distinct nodes link to it. Popular targets (tags, core concepts) rank high — often not what holds clusters together.',
+    articulation: 'Every node whose removal alone disconnects part of the graph (Tarjan). Ignores the slider; hides all of them.',
+  };
+  function betweennessOf(n) { const st = state.struct; return st && st.betweenness.has(n.id) ? st.betweenness.get(n.id) : n.betweenness; }
+  function crossOf(n) { const st = state.struct; return st && st.cross.has(n.id) ? st.cross.get(n.id) : 0; }
+  function metricValue(n) {
+    switch (state.hubMetric) {
+      case 'degree': return n.degree;
+      case 'in_degree': return n.in_degree;
+      case 'articulation': return n.articulation ? 1 : 0;
+      case 'cross': return crossOf(n);
+      default: return betweennessOf(n);
     }
+  }
+  function metricText(n) { return state.hubMetric === 'betweenness' ? (betweennessOf(n) * 100).toFixed(1) + '%' : state.hubMetric === 'articulation' ? (n.articulation ? '✂' : '') : String(metricValue(n)); }
+  function nodeVal(n) {
+    // Sphere volume; radius ∝ cbrt(val). Normalised by the metric's max over the vault so sizes stay sane
+    // whatever the metric's scale: radius ≈ 1× (0) … ~3.5× (top node).
+    const v = state.hubMetric === 'articulation' ? betweennessOf(n) : metricValue(n);
+    const share = state.metricMax > 0 ? Math.min(1, v / state.metricMax) : 0;
+    return 1 + 40 * Math.pow(share, 1.5);
+  }
+
+  // ---------- Structure of the visible graph: betweenness (Brandes) + communities (Louvain) ----------
+  function computeStructure(nodes, links) {
+    const n = nodes.length; const idx = new Map(nodes.map((nd, i) => [nd.id, i]));
+    const adj = Array.from({ length: n }, () => new Set());
+    for (const l of links) { const a = idx.get(l.source), b = idx.get(l.target); if (a === undefined || b === undefined || a === b) continue; adj[a].add(b); adj[b].add(a); }
+    const adjA = adj.map(s => [...s]);
+    // Brandes betweenness (sampled pivots above 4000 nodes)
+    const bet = new Float64Array(n);
+    const sources = n <= 4000 ? Array.from({ length: n }, (_, i) => i) : Array.from({ length: n }, (_, i) => i).filter((_, i) => i % Math.ceil(n / 1500) === 0);
+    const sigma = new Float64Array(n), dist = new Int32Array(n), delta = new Float64Array(n), order = new Int32Array(n), queue = new Int32Array(n);
+    const preds = Array.from({ length: n }, () => []);
+    for (const s of sources) {
+      sigma.fill(0); dist.fill(-1); delta.fill(0); for (let i = 0; i < n; i++) preds[i].length = 0;
+      let qh = 0, qt = 0, oc = 0; sigma[s] = 1; dist[s] = 0; queue[qt++] = s;
+      while (qh < qt) { const v = queue[qh++]; order[oc++] = v; for (const w of adjA[v]) { if (dist[w] < 0) { dist[w] = dist[v] + 1; queue[qt++] = w; } if (dist[w] === dist[v] + 1) { sigma[w] += sigma[v]; preds[w].push(v); } } }
+      while (oc > 0) { const w = order[--oc]; for (const v of preds[w]) delta[v] += sigma[v] / sigma[w] * (1 + delta[w]); if (w !== s) bet[w] += delta[w]; }
+    }
+    let max = 0; for (let i = 0; i < n; i++) max = Math.max(max, bet[i]);
+    const betweenness = new Map(nodes.map((nd, i) => [nd.id, max > 0 ? bet[i] / max : 0]));
+    // Louvain
+    const membership = louvain(adjA);
+    const sizes = new Map(); for (const c of membership) sizes.set(c, (sizes.get(c) || 0) + 1);
+    const orderC = [...sizes.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c); const renum = new Map(orderC.map((c, i) => [c, i]));
+    const community = new Map(nodes.map((nd, i) => [nd.id, renum.get(membership[i])]));
+    const cross = new Map(nodes.map((nd, i) => { let k = 0; for (const j of adjA[i]) if (membership[j] !== membership[i]) k++; return [nd.id, k]; }));
+    return { betweenness, community, cross, communityCount: orderC.length };
+  }
+  function louvain(adjA) {
+    // Undirected, unit weights at level 0; aggregated levels carry weights. Deterministic node order.
+    let n = adjA.length;
+    let adj = adjA.map(list => new Map(list.map(j => [j, 1])));
+    let mapping = Array.from({ length: n }, (_, i) => i); // original node -> current node
+    for (let level = 0; level < 20; level++) {
+      const m2 = adj.reduce((acc, mp) => { for (const w of mp.values()) acc += w; return acc; }, 0); if (m2 === 0) break;
+      const k = adj.map(mp => { let s = 0; for (const w of mp.values()) s += w; return s; });
+      const comm = Array.from({ length: n }, (_, i) => i); const tot = k.slice();
+      let improved = false, moved = true, rounds = 0;
+      while (moved && rounds++ < 50) {
+        moved = false;
+        for (let i = 0; i < n; i++) {
+          const ci = comm[i]; const wTo = new Map();
+          for (const [j, w] of adj[i]) { if (j === i) continue; wTo.set(comm[j], (wTo.get(comm[j]) || 0) + w); }
+          tot[ci] -= k[i];
+          let best = ci, bestGain = (wTo.get(ci) || 0) - tot[ci] * k[i] / m2;
+          for (const [c, w] of wTo) { const g = w - tot[c] * k[i] / m2; if (g > bestGain + 1e-12) { bestGain = g; best = c; } }
+          tot[best] += k[i];
+          if (best !== ci) { comm[i] = best; moved = true; improved = true; }
+        }
+      }
+      if (!improved) break;
+      const ids = [...new Set(comm)].sort((a, b) => a - b); const renum = new Map(ids.map((c, i) => [c, i]));
+      const nn = ids.length; const newAdj = Array.from({ length: nn }, () => new Map());
+      for (let i = 0; i < n; i++) { const ci = renum.get(comm[i]); for (const [j, w] of adj[i]) { const cj = renum.get(comm[j]); newAdj[ci].set(cj, (newAdj[ci].get(cj) || 0) + w); } }
+      mapping = mapping.map(c => renum.get(comm[c]));
+      if (nn === n) break;
+      n = nn; adj = newAdj;
+    }
+    return mapping;
+  }
+  function structureKey(ids) { let h = 2166136261; for (const id of ids) { for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); } h ^= 0x2f; } return ids.length + ':' + (h >>> 0); }
+  function rankedHubs() {
+    // Visible-base nodes ordered by the chosen metric, best first (ties → title), regardless of kind.
+    return state.graph.nodes.filter(baseVisibleNoHub).sort((a, b) => metricValue(b) - metricValue(a) || a.title.localeCompare(b.title));
+  }
+  function recomputeHubSet() {
+    const ranked = rankedHubs();
+    state.metricMax = ranked.length ? (state.hubMetric === 'articulation' ? Math.max(...ranked.map(betweennessOf)) : metricValue(ranked[0])) : 0;
+    const eligible = ranked.filter(n => state.hubKinds.has(n.kind));
+    if (state.hubMetric === 'articulation') state.hubSet = new Set(eligible.filter(n => n.articulation).map(n => n.id));
+    else state.hubSet = new Set(eligible.slice(0, state.hubTop).filter(n => metricValue(n) > 0).map(n => n.id));
+  }
+  function isHub(n) { return state.hubSet.has(n.id); }
+  // Everything except the hub filter: this defines the graph structure is computed on.
+  function baseVisibleNoHub(n) {
+    if (!state.visibleKinds.has(n.kind)) return false;
     if (state.orphans && n.in_degree > 0) return false;
     if (state.types.size && !state.types.has(n.type || '')) return false;
     if (state.tags.size && !n.tags.some(t => state.tags.has(t))) return false;
@@ -291,7 +413,28 @@
     }
     return true;
   }
+  function baseVisible(n) {
+    if (!baseVisibleNoHub(n)) return false;
+    if (state.manualHidden.has(n.id)) return false;
+    if (!state.manualShown.has(n.id)) {
+      const hub = isHub(n);
+      if (state.onlyHubs ? !hub && state.hubKinds.has(n.kind) : hub) return false;
+    }
+    return true;
+  }
+  function ensureStructure() {
+    const base = state.graph.nodes.filter(baseVisibleNoHub);
+    const key = structureKey(base.map(n => n.id));
+    if (state.struct && state.struct.key === key) return;
+    const baseIds = new Set(base.map(n => n.id));
+    const t0 = performance.now();
+    const st = computeStructure(base, state.graph.links.filter(l => baseIds.has(l.source) && baseIds.has(l.target)));
+    st.key = key; state.struct = st;
+    $('#structStatus').textContent = `${st.communityCount} communities in ${base.length} visible nodes (${Math.round(performance.now() - t0)} ms)`;
+  }
   function applyFilters() {
+    ensureStructure();
+    recomputeHubSet();
     let vis = new Set(state.graph.nodes.filter(baseVisible).map(n => n.id));
     if (state.depth > 0 && state.selected) {
       const keep = new Set([state.selected]); let frontier = [state.selected];
@@ -311,8 +454,9 @@
     Graph.graphData({ nodes, links });
     const hidden = state.graph.nodes.filter(n => state.visibleKinds.has(n.kind) && !vis.has(n.id) && (isHub(n) || state.manualHidden.has(n.id)));
     const perKind = {}; for (const h of hidden) perKind[h.kind] = (perKind[h.kind] || 0) + 1;
-    $('#hubCount').textContent = state.hubThresh === Infinity && !state.manualHidden.size ? 'no hubs hidden' : `hiding ${hidden.length} hubs (${Object.entries(perKind).map(([k, v]) => v + ' ' + KIND_LABEL[k]).join(', ') || 'none'})`;
-    $('#showing').textContent = `showing ${nodes.length} / ${state.graph.nodes.length} nodes · ${links.length} / ${state.graph.links.length} links${state.clusterColor ? ' · ' + state.clusterCount + ' clusters' : ''}`;
+    $('#hubCount').textContent = (!hidden.length ? 'no hubs hidden' : `hiding ${hidden.length} hubs (${Object.entries(perKind).map(([k, v]) => v + ' ' + KIND_LABEL[k]).join(', ') || 'none'})`) + ` → ${state.clusterCount} island${state.clusterCount === 1 ? '' : 's'} of ≥2 nodes, ${state.singletonCount} isolated`;
+    $('#showing').textContent = `showing ${nodes.length} / ${state.graph.nodes.length} nodes · ${links.length} / ${state.graph.links.length} links · ${state.clusterCount} island${state.clusterCount === 1 ? '' : 's'}`;
+    Graph.nodeVal(nodeVal);
     renderHubList();
   }
   function computeClusters(nodes, links) {
@@ -321,16 +465,18 @@
     for (const l of links) { const a = find(l.source), b = find(l.target); if (a !== b) parent.set(a, b); }
     const sizes = new Map(); for (const n of nodes) { const r = find(n.id); sizes.set(r, (sizes.get(r) || 0) + 1); }
     const roots = [...sizes.entries()].filter(([, s]) => s > 1).sort((a, b) => b[1] - a[1]).map(([r]) => r);
-    const idx = new Map(roots.map((r, i) => [r, i]));
+    // -2 = the largest component (drawn in normal kind colours), -1 = isolated node, ≥0 = island palette index
+    const idx = new Map(roots.map((r, i) => [r, i === 0 ? -2 : i - 1]));
     state.clusterOf = new Map(nodes.map(n => [n.id, idx.has(find(n.id)) ? idx.get(find(n.id)) : -1]));
     state.clusterCount = roots.length;
+    state.singletonCount = nodes.length - [...sizes.values()].filter(s => s > 1).reduce((a, b) => a + b, 0);
   }
 
   // ---------- Hub list ----------
   function renderHubList() {
     const el = $('#hublist');
-    const top = [...state.graph.nodes].sort((a, b) => b.in_degree - a.in_degree || a.title.localeCompare(b.title)).slice(0, 50);
-    el.innerHTML = top.map(n => `<div class="item ${state.visibleIds.has(n.id) ? '' : 'off'}" data-id="${esc(n.id)}"><span class="dot k-${n.kind}"></span><span class="n" title="${esc(n.title)}">${esc(n.title)}</span><span class="muted">${n.in_degree}</span><button class="icon small jump" title="open">⌖</button></div>`).join('');
+    const top = rankedHubs().slice(0, 60);
+    el.innerHTML = top.map(n => `<div class="item ${state.visibleIds.has(n.id) ? '' : 'off'}" data-id="${esc(n.id)}"><span class="dot k-${n.kind}"></span><span class="n" title="${esc(n.title)}">${esc(n.title)}</span><span class="muted">${metricText(n)}${n.articulation && state.hubMetric !== 'articulation' ? ' ✂' : ''}</span><button class="icon small jump" title="open">⌖</button></div>`).join('');
     el.querySelectorAll('.item').forEach(item => {
       const id = item.dataset.id;
       item.querySelector('.jump').addEventListener('click', (e) => { e.stopPropagation(); state.manualHidden.delete(id); openNode(id); applyFilters(); const n = state.byId.get(id); if (n) setTimeout(() => flyTo(n), 300); });
@@ -405,6 +551,7 @@
     html += `<h3>Outgoing links <span class="muted">${out.length}</span></h3>${linkedList(out)}`;
     noteEl.innerHTML = html;
     noteEl.scrollTop = 0;
+    renderMermaid(noteEl, seq);
     noteEl.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openNode(el.dataset.open)));
     noteEl.querySelectorAll('a.wikilink').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); openNode(a.dataset.slug); }));
     noteEl.querySelectorAll('[data-tag]').forEach(el => { el.style.cursor = 'pointer'; el.addEventListener('click', () => openNode('#' + el.dataset.tag)); });
@@ -412,6 +559,29 @@
     $('#navFwd').onclick = () => history.forward();
     $('#navFocus').onclick = () => flyTo(n);
     $('#navLocal').onclick = () => { state.depth = state.depth ? 0 : 1; $('#depth').value = state.depth; $('#depthVal').textContent = state.depth || 'off'; applyFilters(); };
+  }
+  // ```mermaid fences arrive as <pre><code class="language-mermaid">; render them in place.
+  let mermaidSeq = 0;
+  function mermaidReady() {
+    if (!window.mermaid) return false;
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'default';
+    if (mermaidReady.theme !== theme) { mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme }); mermaidReady.theme = theme; }
+    return true;
+  }
+  async function renderMermaid(root, seq) {
+    if (!mermaidReady()) return;
+    for (const code of [...root.querySelectorAll('pre > code.language-mermaid')]) {
+      const pre = code.parentElement, src = code.textContent;
+      const holder = document.createElement('div'); holder.className = 'mermaid-diagram';
+      pre.replaceWith(holder);
+      try {
+        const { svg, bindFunctions } = await mermaid.render('mmd-' + (++mermaidSeq), src);
+        if (seq !== undefined && seq !== openSeq) return;
+        holder.innerHTML = svg; if (bindFunctions) bindFunctions(holder);
+      } catch (e) {
+        holder.innerHTML = `<pre>${esc(src)}</pre><div class="small muted">mermaid: ${esc(e && e.message || e)}</div>`;
+      }
+    }
   }
   window.addEventListener('popstate', () => routeFromHash(false));
   function routeFromHash(push) {
@@ -455,17 +625,33 @@
 
   // ---------- Filters UI ----------
   function initFilterUi() {
-    const maxIn = maxInDegree();
-    const slider = $('#hubThresh'); slider.max = maxIn + 1;
-    if (state.hubThresh !== Infinity && state.hubThresh > maxIn) state.hubThresh = Infinity;
-    slider.value = state.hubThresh === Infinity ? maxIn + 1 : state.hubThresh;
-    const showThresh = () => { $('#hubThreshVal').textContent = state.hubThresh === Infinity ? '∞ (none)' : state.hubThresh; };
-    slider.oninput = () => { const v = +slider.value; state.hubThresh = v > maxIn ? Infinity : v; showThresh(); applyFilters(); };
-    $('#hubReset').onclick = () => { slider.value = maxIn + 1; state.hubThresh = Infinity; state.manualHidden.clear(); state.manualShown.clear(); showThresh(); applyFilters(); };
-    showThresh();
+    const slider = $('#hubTop'); slider.max = Math.min(300, Math.max(10, state.graph.nodes.length));
+    state.hubTop = Math.min(state.hubTop, +slider.max); slider.value = state.hubTop;
+    const showTop = () => { $('#hubTopVal').textContent = state.hubMetric === 'articulation' ? 'all cut-vertex' : state.hubTop; $('#hubMetricHelp').textContent = METRIC_HELP[state.hubMetric]; slider.disabled = state.hubMetric === 'articulation'; };
+    slider.oninput = () => { state.hubTop = +slider.value; showTop(); applyFilters(); };
+    $('#hubMetric').value = state.hubMetric;
+    $('#hubMetric').onchange = (e) => { state.hubMetric = e.target.value; showTop(); applyFilters(); repaint(); };
+    $('#hubReset').onclick = () => { slider.value = 0; state.hubTop = 0; state.manualHidden.clear(); state.manualShown.clear(); $('#onlyHubs').checked = false; state.onlyHubs = false; showTop(); applyFilters(); };
+    showTop();
     document.querySelectorAll('.hubKind').forEach(cb => cb.onchange = () => { cb.checked ? state.hubKinds.add(cb.value) : state.hubKinds.delete(cb.value); applyFilters(); });
-    $('#onlyHubs').onchange = (e) => { state.onlyHubs = e.target.checked; applyFilters(); };
-    $('#clusterColor').onchange = (e) => { state.clusterColor = e.target.checked; applyFilters(); repaint(); };
+    $('#onlyHubs').onchange = (e) => {
+      state.onlyHubs = e.target.checked;
+      // "only hubs" with nothing ranked as a hub would show an empty graph — pick a sensible N.
+      if (state.onlyHubs && state.hubTop === 0 && state.hubMetric !== 'articulation') { state.hubTop = Math.min(25, +$('#hubTop').max); $('#hubTop').value = state.hubTop; showTop(); }
+      applyFilters();
+    };
+    $('#colorBy').value = state.colorBy;
+    $('#colorBy').onchange = (e) => { state.colorBy = e.target.value; applyFilters(); repaint(); };
+    const reveal = () => {
+      for (const k of ['tag', 'raw', 'missing']) state.visibleKinds.delete(k);
+      renderLegend();
+      state.hubMetric = 'cross'; $('#hubMetric').value = 'cross';
+      state.hubTop = Math.min(30, +slider.max); slider.value = state.hubTop;
+      state.colorBy = 'community'; $('#colorBy').value = 'community';
+      showTop(); applyFilters(); repaint(); toast('Tags/raw/unresolved hidden · top 30 cross-cluster hubs hidden · coloured by community');
+      setTimeout(() => Graph.zoomToFit(600, 40, n => state.visibleIds.has(n.id)), 1500);
+    };
+    $('#revealClusters').onclick = reveal; $('#btnReveal').onclick = reveal;
     $('#orphans').onchange = (e) => { state.orphans = e.target.checked; applyFilters(); };
     $('#depth').oninput = (e) => { state.depth = +e.target.value; $('#depthVal').textContent = state.depth || 'off'; applyFilters(); };
     let tT; $('#fText').oninput = (e) => { clearTimeout(tT); tT = setTimeout(() => { state.text = e.target.value.trim().toLowerCase(); applyFilters(); }, 200); };
@@ -490,7 +676,7 @@
   $('#btnRight').onclick = () => $('#app').classList.toggle('no-right');
   $('#btnFilters').onclick = () => { $('#filters').classList.toggle('hidden'); $('#btnFilters').classList.toggle('active'); };
   $('#btnFit').onclick = () => Graph.zoomToFit(600, 40, n => state.visibleIds.has(n.id));
-  $('#btnTheme').onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('okf-theme', t); Graph.backgroundColor(css('--graph-bg')); repaint(); };
+  $('#btnTheme').onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('okf-theme', t); Graph.backgroundColor(css('--graph-bg')); repaint(); if (state.selected) openNode(state.selected, { push: false }); };
   $('#btnRefresh').onclick = async () => { toast('Rebuilding graph…'); await fetch('/api/refresh', { method: 'POST' }); await load(); toast('Graph refreshed'); };
   window.addEventListener('keydown', (e) => {
     if (e.key === '/' && document.activeElement !== $('#q') && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); $('#q').focus(); $('#q').select(); }
