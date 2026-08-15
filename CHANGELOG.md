@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.12.0] - 2026-08-15
 
 ### Added
 - Explorer hub detection that actually finds the glue: `explorer::graph` now computes undirected `degree`, normalised **betweenness centrality** (Brandes; sampled pivots above 4000 nodes) and **articulation points** (Tarjan) per node, and the UI recomputes betweenness plus **Louvain communities** on the *visible* graph. The hub metric is selectable — bridging, cross-cluster links, connections, inbound only, cut vertices — with "hide top N hubs", island/isolated counts, colour by community or by island, and a one-click **✨ Reveal clusters** preset. (In-degree alone ranked popular tags/pages that bridge nothing, so hiding them produced no islands.)
