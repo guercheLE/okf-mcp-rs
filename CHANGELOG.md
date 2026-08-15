@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] - 2026-08-15
+
+### Fixed
+- Explorer: the hub-metric and colour-by comboboxes were unreadable in the dark theme (light native background, light text); selects now use the page colours and the page declares `color-scheme`.
+
 ## [0.12.0] - 2026-08-15
 
 ### Added
