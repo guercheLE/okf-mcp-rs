@@ -43,7 +43,7 @@ fn version_help_and_config_are_available() {
     let help_text = stdout(&help);
     for command in [
         "ingest", "compile", "rebuild", "models", "lint", "reindex", "search", "delete", "run",
-        "vault", "start", "http",
+        "vault", "start", "http", "explore",
     ] {
         assert!(
             help_text.contains(command),

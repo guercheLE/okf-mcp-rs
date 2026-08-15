@@ -1,12 +1,12 @@
 # okf-mcp
 
-A Git-native, offline-first **OKF (Open Knowledge Format) pipeline**: ingest web pages (via Firecrawl) or local files into an immutable `./raw/` archive, compile them into a linked `./wiki/` of concept pages with an LLM, lint the result, and search it — hybrid full-text + dense-vector, merged with Reciprocal Rank Fusion. One binary, usable as a CLI (`okf-mcp <command>`) and as an MCP server (`okf-mcp start` / `okf-mcp http`) for AI coding agents.
+A Git-native, offline-first **OKF (Open Knowledge Format) pipeline**: ingest web pages (via Firecrawl) or local files into an immutable `./raw/` archive, compile them into a linked `./wiki/` of concept pages with an LLM, lint the result, search it — hybrid full-text + dense-vector, merged with Reciprocal Rank Fusion — and explore it in the browser as a 3D link graph. One binary, usable as a CLI (`okf-mcp <command>`) and as an MCP server (`okf-mcp start` / `okf-mcp http`) for AI coding agents.
 
 [![Sponsor](https://img.shields.io/github/sponsors/guerchele?label=Sponsor&logo=github&color=EA4AAA)](https://github.com/sponsors/guerchele)
 
 Building and maintaining this took real ideation, time, design effort, and compute (including LLM usage) to get right. If it's useful to you, consider [sponsoring its development](https://github.com/sponsors/guerchele) — any amount helps keep it going. 💛
 
-Ten fixed, well-defined tools — `okf-ingest`, `okf-compile`, `okf-rebuild`, `okf-lint`, `okf-reindex`, `okf-search`, `okf-delete`, `okf-read-index`, `okf-read-concept`, `okf-list-vaults` — not a discovery layer over an unknown API surface. Each does exactly one named thing; `okf-search`'s hybrid ranking is an internal implementation detail, not something you need to know about to use it.
+Thirteen fixed, well-defined tools — `okf-ingest`, `okf-compile`, `okf-rebuild`, `okf-synthesize-next`, `okf-synthesize-submit`, `okf-lint`, `okf-reindex`, `okf-search`, `okf-delete`, `okf-read-index`, `okf-read-concept`, `okf-list-vaults`, `okf-explore` — not a discovery layer over an unknown API surface. Each does exactly one named thing; `okf-search`'s hybrid ranking is an internal implementation detail, not something you need to know about to use it.
 
 ## Pipeline
 
@@ -17,12 +17,15 @@ flowchart LR
     B -->|"LLM compile"| C["./wiki"]
     C -->|"lint / validate"| D["git commit"]
     C -.-> E["okf-reindex / okf-search"]
+    C -.-> F["okf-explore
+    (3D graph, backlinks)"]
 ```
 
 - **`./raw/`** — append-only. Every ingested source is hashed (SHA-256) and tracked in a content-addressable manifest (`.okf/manifest.json`): re-ingesting unchanged content is a no-op, changed content supersedes the old version (never overwritten), and deletion is a soft tombstone by default (`--purge` for a hard delete).
 - **`./wiki/concepts/`** — LLM-compiled, atomic, cross-linked (`[[concept-slug]]`) Markdown pages, one concept per file, each declaring its raw-source provenance in frontmatter.
 - **`okf-mcp lint`** — checks for dangling links, missing provenance, and orphan pages before you commit.
 - **`okf-mcp reindex` / `okf-mcp search`** — a local Tantivy (BM25) + `sqlite-vec` (dense embeddings) index, merged via RRF; no external service.
+- **`okf-mcp explore`** — an Obsidian-style, browser-based explorer for the vault: 3D force-directed link graph, note pane with backlinks, hub filtering to reveal clusters, and search over that same index. See [Explore](#explore).
 
 See [docs/okf-pipeline-design.md](docs/okf-pipeline-design.md) for the full design rationale and [docs/okf-mcp-implementation-plan.md](docs/okf-mcp-implementation-plan.md) for how it was built. [CHANGELOG.md](CHANGELOG.md) tracks releases; [docs/design-gaps.md](docs/design-gaps.md) tracks what the planning docs missed along the way, for anyone wanting the retrospective lessons rather than just the diffs.
 
@@ -81,6 +84,7 @@ An OKF vault happens to also be a valid Obsidian vault (`.obsidian/` and `.okf/`
 | `search` | `<query> [-l/--limit] [--json] [--all-vaults]` | Search ingested raw sources and compiled wiki concepts |
 | `delete` | `<URL\|FILE> [--purge]` | Remove a source from the vault (soft by default; `--purge` hard-deletes) |
 | `run` | `<URL\|FILE> [--tag <tag>]... [--model]` | Ingest, compile, lint, and commit as one step; `--tag` is repeatable |
+| `explore` | `[--host] [--port] [--no-open]` | Open the vault in the browser-based explorer (3D link graph, note pane, backlinks, hub filter, search) — see [Explore](#explore) |
 | `vault list` / `add` / `create` / `remove` (`rm`) / `delete` / `default` | — | Manage vaults / knowledge bases — also reachable as `kb ...` |
 | `setup` | — | Configure the Firecrawl API key and an LLM provider key |
 | `credentials list` | — | List every account a credential could be saved under, and whether one actually is (never the value) |
@@ -106,6 +110,24 @@ At very high volume, a local Ollama model (`ollama/<model>`) is worth considerin
 
 Also note: `.okf/config.toml`'s `[compiler].max_tokens` (see [Configuration](#configuration) below) now actually takes effect on every `compile`/`rebuild` call, capping each LLM response.
 
+## Explore
+
+```bash
+okf-mcp explore                      # resolved vault, random free port, opens your browser
+okf-mcp --vault my-notes explore --port 8765 --no-open
+```
+
+`explore` starts a small local server (loopback only, no auth — it's a viewer for files you already have) and opens one self-contained page, fully offline (the 3D graph library is embedded in the binary):
+
+- **3D graph** — every wiki page (`concept` / `entity`), every frontmatter tag (`#tag`, its own node like in Obsidian), every cited raw source, cross-vault references, and unresolved wikilinks (dim, like Obsidian). Node size = inbound links; hover to see a node's neighbors; click to open it; double-click to fly to it. Right-click/drag to orbit, wheel to zoom.
+- **Hub filter** — hubs are ranked purely by inbound links, whatever their kind (a heavily-linked note counts exactly like a popular tag). "Hide hubs with in-degree ≥ N" removes them and their edges, so the islands and clusters they otherwise glue together become visible; "Color by cluster" paints each connected component. A ranked top-hubs list lets you hide/show individual hubs; per-kind checkboxes narrow which kinds the filter applies to.
+- **Filters** — text filter, type / tag multiselect, per-kind visibility (legend), orphans-only, local graph (1–3 hops from the selected node), force sliders, link particles, labels.
+- **Note pane** — rendered Markdown with clickable wikilinks, the *complete* frontmatter as a properties table (`sources` link to their raw files, tags to their tag node), **linked mentions** (backlinks) and outgoing links; browser back/forward work (`#/note/<slug>` routing).
+- **Search** — the vault's own hybrid BM25 + vector index via the same code path as `okf-mcp search`; hits are highlighted in the graph. Run `okf-mcp reindex --embeddings` first if the vault was never indexed.
+- **Files** sidebar, ↻ Refresh (rebuilds the graph from disk), light/dark theme, `/` to search, `Esc` to clear.
+
+The same explorer is available to MCP clients as `okf-explore` (returns the URL, optionally opens the browser; a second call for the same vault reuses the running server).
+
 ## MCP tools
 
 | Tool | Args | Description |
@@ -123,6 +145,7 @@ Also note: `.okf/config.toml`'s `[compiler].max_tokens` (see [Configuration](#co
 | `okf-read-index` | `vault?` | Read the wiki's table-of-contents page |
 | `okf-read-concept` | `id_or_path, vault?` | Read a single compiled wiki concept page |
 | `okf-list-vaults` | — | List every vault registered on this machine |
+| `okf-explore` | `vault?, open?, port?` | Start (or reuse) the local browser-based explorer for the vault and return its URL — see [Explore](#explore) |
 
 ### Client-driven synthesis: `okf-synthesize-next` / `okf-synthesize-submit`
 

@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OKF Explorer</title>
+<style>
+  :root {
+    --bg: #ffffff; --bg2: #f4f4f5; --bg3: #e9e9ec; --fg: #1f2328; --fg2: #57606a; --line: #d9d9de;
+    --accent: #7c5cff; --link: #5b47d6; --sel: #ffd166;
+    --c-concept: #6b6b6b; --c-entity: #3d8bfd; --c-tag: #2fb344; --c-raw: #f28c28; --c-cross: #b05cd6; --c-missing: #c9c9c9;
+    --graph-bg: #fbfbfc; --shadow: 0 6px 24px rgba(0,0,0,.12);
+  }
+  [data-theme="dark"] {
+    --bg: #1e1e22; --bg2: #26262b; --bg3: #303036; --fg: #e6e6e9; --fg2: #a1a1aa; --line: #3a3a42;
+    --accent: #a48cff; --link: #b8a6ff; --sel: #ffd166;
+    --c-concept: #a9a9ad; --c-entity: #5da3ff; --c-tag: #3ec95a; --c-raw: #ffa04d; --c-cross: #cd7dff; --c-missing: #55555c;
+    --graph-bg: #141417; --shadow: 0 6px 24px rgba(0,0,0,.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; color: var(--fg); background: var(--bg); overflow: hidden; }
+  a { color: var(--link); }
+  button, select, input { font: inherit; color: inherit; }
+  button { background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.icon { padding: 3px 7px; }
+  button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--bg3)); }
+  input[type=text], input[type=search] { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; outline: none; }
+  input[type=text]:focus, input[type=search]:focus { border-color: var(--accent); }
+  input[type=range] { width: 100%; }
+  select[multiple] { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px; }
+  .muted { color: var(--fg2); }
+  .small { font-size: 11.5px; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .grow { flex: 1; }
+  .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--bg3); font-size: 11.5px; margin: 1px 3px 1px 0; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  .k-concept { background: var(--c-concept);} .k-entity { background: var(--c-entity);} .k-tag { background: var(--c-tag);} .k-raw { background: var(--c-raw);} .k-cross_vault { background: var(--c-cross);} .k-missing { background: var(--c-missing);}
+  #app { --left: 280px; --right: 420px; display: grid; grid-template-columns: var(--left) 1fr var(--right); grid-template-rows: 44px 1fr; height: 100%; }
+  #app.no-left { --left: 0px; } #app.no-right { --right: 0px; }
+  @media (max-width: 1400px) { #app { --left: 240px; --right: 380px; } }
+  @media (max-width: 1100px) { #app { --left: 220px; --right: 340px; } }
+  #left.collapsed, #note.collapsed { display: none; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--bg2); }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; white-space: nowrap; }
+  header .stats { color: var(--fg2); white-space: nowrap; }
+  aside { overflow: auto; border-right: 1px solid var(--line); background: var(--bg2); padding: 10px; }
+  #left h3, #note h3, #filters h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg2); margin: 12px 0 6px; }
+  #results .hit, .list .item { padding: 5px 7px; border-radius: 6px; cursor: pointer; }
+  #results .hit:hover, .list .item:hover { background: var(--bg3); }
+  #results .hit .t { font-weight: 600; } #results .hit .s { color: var(--fg2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  details.tree > summary { cursor: pointer; padding: 4px 0; font-weight: 600; user-select: none; }
+  details.tree .item { padding: 2px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #stage { position: relative; background: var(--graph-bg); overflow: hidden; }
+  #graph { position: absolute; inset: 0; }
+  #legend { position: absolute; left: 10px; bottom: 10px; background: color-mix(in srgb, var(--bg2) 85%, transparent); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 11.5px; backdrop-filter: blur(6px); }
+  #legend label { display: block; cursor: pointer; }
+  #toolbar { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; }
+  #filters { position: absolute; top: 46px; right: 10px; width: 300px; max-height: calc(100% - 60px); overflow: auto; background: color-mix(in srgb, var(--bg2) 94%, transparent); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 12px; box-shadow: var(--shadow); backdrop-filter: blur(8px); }
+  #filters.hidden { display: none; }
+  #filters .field { margin: 8px 0; }
+  #filters label.inline { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; cursor: pointer; }
+  #hublist .item { display: flex; align-items: center; gap: 6px; }
+  #hublist .item .n { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #hublist .item.off .n { text-decoration: line-through; color: var(--fg2); }
+  #showing { position: absolute; left: 10px; top: 10px; background: color-mix(in srgb, var(--bg2) 85%, transparent); border: 1px solid var(--line); border-radius: 8px; padding: 4px 9px; font-size: 11.5px; }
+  #note { overflow: auto; border-left: 1px solid var(--line); border-right: 0; padding: 12px 16px 40px; }
+  #app.no-left #left, #app.no-right #note { display: none; }
+  #note .path { color: var(--fg2); font-size: 11.5px; word-break: break-all; }
+  #note h2.title { margin: 6px 0 4px; font-size: 20px; }
+  #note table.props { width: 100%; border-collapse: collapse; margin: 6px 0 12px; font-size: 12px; }
+  #note table.props td { vertical-align: top; padding: 3px 6px; border-bottom: 1px solid var(--line); word-break: break-word; }
+  #note table.props td:first-child { color: var(--fg2); width: 30%; white-space: nowrap; }
+  #note .body { line-height: 1.55; }
+  #note .body h1 { font-size: 20px; } #note .body h2 { font-size: 17px; margin-top: 20px; } #note .body h3 { font-size: 14px; }
+  #note .body pre { background: var(--bg3); padding: 8px; border-radius: 6px; overflow: auto; }
+  #note .body code { background: var(--bg3); padding: 1px 4px; border-radius: 4px; font-size: 12px; }
+  #note .body table { border-collapse: collapse; } #note .body td, #note .body th { border: 1px solid var(--line); padding: 3px 6px; }
+  #note .body blockquote { border-left: 3px solid var(--line); margin: 0; padding-left: 10px; color: var(--fg2); }
+  #note .body img { max-width: 100%; }
+  a.wikilink { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+  a.wikilink.missing { color: var(--fg2); border-bottom-style: dashed; }
+  #note .links .item { padding: 3px 6px; }
+  #note .empty { color: var(--fg2); text-align: center; margin-top: 60px; }
+  #toast { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--bg3); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.on { opacity: 1; }
+  kbd { background: var(--bg3); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button class="icon" id="btnLeft" title="Toggle sidebar">☰</button>
+    <h1>OKF Explorer <span class="muted" id="vaultName"></span></h1>
+    <span class="stats" id="stats"></span>
+    <span class="grow"></span>
+    <button class="icon" id="btnRefresh" title="Rebuild the graph from disk">↻ Refresh</button>
+    <button class="icon" id="btnTheme" title="Toggle light/dark">◐</button>
+    <button class="icon" id="btnRight" title="Toggle note pane">▭</button>
+  </header>
+
+  <aside id="left">
+    <input type="search" id="q" placeholder="Search vault…  ( / )" autocomplete="off">
+    <div class="small muted" id="qStatus" style="margin-top:4px"></div>
+    <div id="results"></div>
+    <h3>Files</h3>
+    <div id="tree"></div>
+  </aside>
+
+  <div id="stage">
+    <div id="graph"></div>
+    <div id="showing"></div>
+    <div id="toolbar">
+      <button class="icon" id="btnFit" title="Fit all visible nodes">⤢ Fit</button>
+      <button class="icon" id="btnFilters" title="Filters">⚙ Filters</button>
+    </div>
+    <div id="filters" class="hidden">
+      <h3>Search filter</h3>
+      <div class="field"><input type="text" id="fText" placeholder="title, slug, type or tag contains…"></div>
+
+      <h3>Hubs</h3>
+      <div class="field small muted">Node size = inbound links. Hide the biggest hubs (of <em>any</em> kind) to reveal the islands and clusters they glue together.</div>
+      <div class="field">
+        <div class="row"><span>Hide hubs with in-degree ≥ <b id="hubThreshVal"></b></span><span class="grow"></span><button class="icon small" id="hubReset">reset</button></div>
+        <input type="range" id="hubThresh" min="1" max="2" step="1">
+        <div class="small muted" id="hubCount"></div>
+      </div>
+      <div class="field small">
+        Apply hub filter to:
+        <label class="inline"><input type="checkbox" class="hubKind" value="concept" checked>notes</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="entity" checked>entities</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="tag" checked>tags</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="raw" checked>raw</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="cross_vault" checked>cross-vault</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="missing" checked>missing</label>
+      </div>
+      <div class="field">
+        <label class="inline"><input type="checkbox" id="onlyHubs">Show only hubs (invert)</label>
+        <label class="inline"><input type="checkbox" id="clusterColor">Color by cluster</label>
+      </div>
+      <details><summary class="small">Top hubs (click to hide/show, ⌖ to jump)</summary><div id="hublist" class="list small"></div></details>
+
+      <h3>Show</h3>
+      <div class="field">
+        <label class="inline"><input type="checkbox" id="orphans">Orphans only (no inbound links)</label>
+      </div>
+      <div class="field">
+        <div class="row"><span>Local graph depth: <b id="depthVal">off</b></span></div>
+        <input type="range" id="depth" min="0" max="3" step="1" value="0">
+        <div class="small muted">Hops from the selected node (0 = whole vault)</div>
+      </div>
+      <div class="field"><div class="small muted">Types</div><select multiple id="fTypes" size="4"></select></div>
+      <div class="field"><div class="small muted">Tags</div><select multiple id="fTags" size="5"></select></div>
+      <div class="field"><button class="icon small" id="clearSel">clear type/tag selection</button></div>
+
+      <h3>Forces</h3>
+      <div class="field"><div class="small">Repulsion <b id="chargeVal"></b></div><input type="range" id="charge" min="5" max="300" value="60"></div>
+      <div class="field"><div class="small">Link distance <b id="linkDistVal"></b></div><input type="range" id="linkDist" min="5" max="150" value="30"></div>
+      <div class="field"><label class="inline"><input type="checkbox" id="particles">Link particles</label></div>
+    </div>
+    <div id="legend"></div>
+    <div id="toast"></div>
+  </div>
+
+  <aside id="note">
+    <div class="empty">Click a node, a search result or a file to open it.<br><br><span class="small">Hover a node to see its neighbors · double-click to fly to it · <kbd>/</kbd> search · <kbd>Esc</kbd> clear</span></div>
+  </aside>
+</div>
+
+<script src="/vendor/3d-force-graph.min.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (s) => document.querySelector(s);
+  const KINDS = ['concept', 'entity', 'tag', 'raw', 'cross_vault', 'missing'];
+  const KIND_LABEL = { concept: 'notes', entity: 'entities', tag: 'tags', raw: 'raw sources', cross_vault: 'cross-vault', missing: 'unresolved' };
+  const CLUSTER_PALETTE = ['#e6194b','#3cb44b','#ffe119','#4363d8','#f58231','#911eb4','#42d4f4','#f032e6','#bfef45','#fabed4','#469990','#dcbeff','#9a6324','#fffac8','#800000','#aaffc3','#808000','#ffd8b1','#000075','#a9a9a9'];
+
+  const state = {
+    graph: { nodes: [], links: [] },
+    byId: new Map(),
+    neighbors: new Map(),   // id -> Set(id)
+    visibleKinds: new Set(KINDS),
+    hubThresh: Infinity,
+    hubKinds: new Set(KINDS),
+    manualHidden: new Set(),
+    manualShown: new Set(),    // hubs the user un-hid individually despite the threshold
+    onlyHubs: false,
+    clusterColor: false,
+    orphans: false,
+    depth: 0,
+    text: '',
+    types: new Set(),
+    tags: new Set(),
+    selected: null,
+    hover: null,
+    highlight: null,        // Set(id) from search, or null
+    visibleIds: new Set(),
+    clusterOf: new Map(),
+  };
+
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const kindColor = (k) => css('--c-' + (k === 'cross_vault' ? 'cross' : k)) || '#888';
+  function mix(hex, hex2, t) { // hex colors -> mixed hex
+    const p = (h) => { h = h.replace('#',''); if (h.length===3) h = h.split('').map(c=>c+c).join(''); return [0,2,4].map(i => parseInt(h.slice(i,i+2),16)); };
+    const a = p(hex), b = p(hex2); return '#' + a.map((v,i) => Math.round(v*(1-t)+b[i]*t).toString(16).padStart(2,'0')).join('');
+  }
+
+  const toastEl = $('#toast'); let toastT;
+  function toast(msg) { toastEl.textContent = msg; toastEl.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove('on'), 2200); }
+
+  // ---------- Graph ----------
+  const Graph = ForceGraph3D()($('#graph'))
+    .nodeId('id')
+    .nodeRelSize(3.2)
+    .nodeVal(n => Math.pow(1 + n.in_degree, 1.5))
+    .nodeOpacity(0.95)
+    .nodeLabel(n => `<div style="background:${css('--bg2')};color:${css('--fg')};padding:4px 8px;border-radius:6px;border:1px solid ${css('--line')};font:12px sans-serif"><b>${esc(n.title)}</b><br><span style="opacity:.7">${n.kind}${n.type ? ' · ' + esc(n.type) : ''} · in ${n.in_degree} · out ${n.out_degree} · hub #${n.hub_rank}</span></div>`)
+    .nodeColor(nodeColor)
+    .linkColor(linkColor)
+    .linkOpacity(0.35)
+    .linkWidth(l => isLinkHot(l) ? 1.2 : 0)
+    .linkDirectionalParticles(0)
+    .linkDirectionalParticleWidth(1.2)
+    .onNodeClick(n => openNode(n.id))
+    .onNodeRightClick(n => flyTo(n))
+    .onNodeHover(n => { state.hover = n || null; repaint(); })
+    .onBackgroundClick(() => { /* keep selection */ })
+    .warmupTicks(30)
+    .cooldownTicks(200);
+  Graph.d3Force('charge').strength(-60);
+  Graph.d3Force('link').distance(30);
+  let lastClick = { id: null, t: 0 };
+  Graph.onNodeClick(n => {
+    const now = Date.now();
+    if (lastClick.id === n.id && now - lastClick.t < 400) { flyTo(n); }
+    else { openNode(n.id); }
+    lastClick = { id: n.id, t: now };
+  });
+
+  function isNodeHot(n) {
+    if (state.hover) return n === state.hover || (state.neighbors.get(state.hover.id) || new Set()).has(n.id);
+    return null;
+  }
+  function isLinkHot(l) {
+    const s = typeof l.source === 'object' ? l.source.id : l.source, t = typeof l.target === 'object' ? l.target.id : l.target;
+    const focus = state.hover ? state.hover.id : state.selected;
+    return focus && (s === focus || t === focus);
+  }
+  function nodeColor(n) {
+    let base = state.clusterColor ? (CLUSTER_PALETTE[state.clusterOf.get(n.id) % CLUSTER_PALETTE.length] || kindColor(n.kind)) : kindColor(n.kind);
+    if (state.clusterColor && state.clusterOf.get(n.id) === -1) base = kindColor('missing');
+    const bg = css('--graph-bg');
+    if (n.id === state.selected) return css('--sel');
+    const hot = isNodeHot(n);
+    if (hot === false) return mix(base, bg, 0.8);
+    if (hot === true) return base;
+    if (state.highlight) return state.highlight.has(n.id) ? css('--sel') : mix(base, bg, 0.75);
+    if (state.selected) return (state.neighbors.get(state.selected) || new Set()).has(n.id) ? base : mix(base, bg, 0.35);
+    return base;
+  }
+  function linkColor(l) {
+    const hot = isLinkHot(l);
+    const base = l.kind === 'tag' ? kindColor('tag') : l.kind === 'source' ? kindColor('raw') : l.kind === 'cross_vault' ? kindColor('cross_vault') : css('--fg2');
+    return hot ? css('--sel') : mix(base, css('--graph-bg'), state.hover ? 0.8 : state.selected ? 0.6 : 0.45);
+  }
+  function repaint() { Graph.nodeColor(Graph.nodeColor()); Graph.linkColor(Graph.linkColor()); Graph.linkWidth(Graph.linkWidth()); }
+  function flyTo(n) {
+    if (n.x === undefined) return;
+    const dist = 90; const r = Math.hypot(n.x, n.y, n.z) || 1; const k = 1 + dist / r;
+    Graph.cameraPosition({ x: n.x * k, y: n.y * k, z: n.z * k }, n, 1200);
+  }
+
+  // ---------- Filtering ----------
+  function maxInDegree() { return state.graph.nodes.reduce((m, n) => Math.max(m, n.in_degree), 0); }
+  function isHub(n) { return state.hubKinds.has(n.kind) && n.in_degree >= state.hubThresh; }
+  function baseVisible(n) {
+    if (!state.visibleKinds.has(n.kind)) return false;
+    if (state.manualHidden.has(n.id)) return false;
+    if (!state.manualShown.has(n.id)) {
+      const hub = isHub(n);
+      if (state.onlyHubs ? !hub && state.hubKinds.has(n.kind) : hub) return false;
+    }
+    if (state.orphans && n.in_degree > 0) return false;
+    if (state.types.size && !state.types.has(n.type || '')) return false;
+    if (state.tags.size && !n.tags.some(t => state.tags.has(t))) return false;
+    if (state.text) {
+      const q = state.text;
+      if (!(n.title.toLowerCase().includes(q) || n.id.toLowerCase().includes(q) || (n.type || '').toLowerCase().includes(q) || n.tags.some(t => t.toLowerCase().includes(q)))) return false;
+    }
+    return true;
+  }
+  function applyFilters() {
+    let vis = new Set(state.graph.nodes.filter(baseVisible).map(n => n.id));
+    if (state.depth > 0 && state.selected) {
+      const keep = new Set([state.selected]); let frontier = [state.selected];
+      for (let d = 0; d < state.depth; d++) {
+        const next = [];
+        for (const id of frontier) for (const nb of (state.neighbors.get(id) || [])) if (!keep.has(nb) && vis.has(nb)) { keep.add(nb); next.push(nb); }
+        frontier = next;
+      }
+      keep.add(state.selected);
+      vis = new Set([...vis].filter(id => keep.has(id)));
+      vis.add(state.selected);
+    }
+    state.visibleIds = vis;
+    const nodes = state.graph.nodes.filter(n => vis.has(n.id));
+    const links = state.graph.links.filter(l => vis.has(l.source) && vis.has(l.target)).map(l => ({ source: l.source, target: l.target, kind: l.kind }));
+    computeClusters(nodes, links);
+    Graph.graphData({ nodes, links });
+    const hidden = state.graph.nodes.filter(n => state.visibleKinds.has(n.kind) && !vis.has(n.id) && (isHub(n) || state.manualHidden.has(n.id)));
+    const perKind = {}; for (const h of hidden) perKind[h.kind] = (perKind[h.kind] || 0) + 1;
+    $('#hubCount').textContent = state.hubThresh === Infinity && !state.manualHidden.size ? 'no hubs hidden' : `hiding ${hidden.length} hubs (${Object.entries(perKind).map(([k, v]) => v + ' ' + KIND_LABEL[k]).join(', ') || 'none'})`;
+    $('#showing').textContent = `showing ${nodes.length} / ${state.graph.nodes.length} nodes · ${links.length} / ${state.graph.links.length} links${state.clusterColor ? ' · ' + state.clusterCount + ' clusters' : ''}`;
+    renderHubList();
+  }
+  function computeClusters(nodes, links) {
+    const parent = new Map(nodes.map(n => [n.id, n.id]));
+    const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+    for (const l of links) { const a = find(l.source), b = find(l.target); if (a !== b) parent.set(a, b); }
+    const sizes = new Map(); for (const n of nodes) { const r = find(n.id); sizes.set(r, (sizes.get(r) || 0) + 1); }
+    const roots = [...sizes.entries()].filter(([, s]) => s > 1).sort((a, b) => b[1] - a[1]).map(([r]) => r);
+    const idx = new Map(roots.map((r, i) => [r, i]));
+    state.clusterOf = new Map(nodes.map(n => [n.id, idx.has(find(n.id)) ? idx.get(find(n.id)) : -1]));
+    state.clusterCount = roots.length;
+  }
+
+  // ---------- Hub list ----------
+  function renderHubList() {
+    const el = $('#hublist');
+    const top = [...state.graph.nodes].sort((a, b) => b.in_degree - a.in_degree || a.title.localeCompare(b.title)).slice(0, 50);
+    el.innerHTML = top.map(n => `<div class="item ${state.visibleIds.has(n.id) ? '' : 'off'}" data-id="${esc(n.id)}"><span class="dot k-${n.kind}"></span><span class="n" title="${esc(n.title)}">${esc(n.title)}</span><span class="muted">${n.in_degree}</span><button class="icon small jump" title="open">⌖</button></div>`).join('');
+    el.querySelectorAll('.item').forEach(item => {
+      const id = item.dataset.id;
+      item.querySelector('.jump').addEventListener('click', (e) => { e.stopPropagation(); state.manualHidden.delete(id); openNode(id); applyFilters(); const n = state.byId.get(id); if (n) setTimeout(() => flyTo(n), 300); });
+      item.addEventListener('click', () => {
+        if (state.visibleIds.has(id)) { state.manualShown.delete(id); state.manualHidden.add(id); }
+        else { state.manualHidden.delete(id); state.manualShown.add(id); }
+        applyFilters();
+      });
+    });
+  }
+
+  // ---------- Legend / kinds ----------
+  function renderLegend() {
+    const counts = {}; for (const n of state.graph.nodes) counts[n.kind] = (counts[n.kind] || 0) + 1;
+    $('#legend').innerHTML = KINDS.filter(k => counts[k]).map(k => `<label><input type="checkbox" data-kind="${k}" ${state.visibleKinds.has(k) ? 'checked' : ''}> <span class="dot k-${k}"></span>${KIND_LABEL[k]} <span class="muted">${counts[k]}</span></label>`).join('');
+    $('#legend').querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => { cb.checked ? state.visibleKinds.add(cb.dataset.kind) : state.visibleKinds.delete(cb.dataset.kind); applyFilters(); }));
+  }
+
+  // ---------- Note pane ----------
+  const noteEl = $('#note');
+  function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  function linkedList(items) {
+    return items.length ? `<div class="links list">${items.map(l => `<div class="item" data-open="${esc(l.id)}"><span class="dot k-${l.kind}"></span>${esc(l.title)}</div>`).join('')}</div>` : '<div class="muted small">none</div>';
+  }
+  function fmValue(key, v) {
+    if (Array.isArray(v)) {
+      if (key === 'tags') return v.map(t => `<span class="chip" data-tag="${esc(String(t).replace(/^#/, ''))}">#${esc(String(t).replace(/^#/, ''))}</span>`).join('');
+      if (key === 'sources') return v.map(s => { const res = typeof s === 'object' && s ? String(s.resource ?? '') : String(s ?? ''); const stem = res.replace(/^\.?\/*/, '').split('/').pop().replace(/\.[^.]+$/, ''); const title = (s && typeof s === 'object' && s.title != null ? String(s.title) : '') || res; return `<div><span class="dot k-raw"></span><a href="#/note/raw:${esc(stem)}" class="wikilink" data-slug="raw:${esc(stem)}">${esc(title)}</a>${s && s.id ? ` <span class="muted small">[^${esc(s.id)}]</span>` : ''}</div>`; }).join('');
+      return v.map(x => `<span class="chip">${esc(typeof x === 'object' ? JSON.stringify(x) : x)}</span>`).join('');
+    }
+    if (v && typeof v === 'object') return `<code class="small">${esc(JSON.stringify(v))}</code>`;
+    if (typeof v === 'string' && /^https?:\/\//.test(v)) return `<a href="${esc(v)}" target="_blank" rel="noopener">${esc(v)}</a>`;
+    return esc(v);
+  }
+  let openSeq = 0;
+  async function openNode(id, { push = true } = {}) {
+    try { await openNodeInner(id, push); } catch (e) { console.error(e); noteEl.innerHTML = `<div class="muted">Could not render ${esc(id)}: ${esc(e)}</div>`; }
+  }
+  async function openNodeInner(id, push) {
+    let n = state.byId.get(id);
+    if (!n && id.startsWith('raw:')) {
+      // A raw source no page cites: not a graph node, but the API can still render it.
+      n = { id, title: id.slice(4), kind: 'raw', path: 'raw/' + id.slice(4) + '.md', tags: [], in_degree: 0, out_degree: 0, hub_rank: 0, uncited: true };
+    }
+    if (!n) { toast('Not in graph: ' + id); return; }
+    state.selected = id; state.hover = null;
+    const seq = ++openSeq;
+    if (push) { const h = '#/note/' + encodeURIComponent(id); if (location.hash !== h) history.pushState(null, '', h); }
+    if (state.depth > 0) applyFilters(); else repaint();
+    if (!n.uncited && !state.visibleIds.has(id)) toast('Node is hidden by the current filters');
+    $('#app').classList.remove('no-right');
+    let view = null, err = null;
+    if (n.path) {
+      try { const r = await fetch('/api/page/' + encodeURIComponent(id).replace(/%2F/g, '/')); const j = await r.json(); if (r.ok) view = j; else err = j.error; }
+      catch (e) { err = String(e); }
+    }
+    if (seq !== openSeq) return; // a newer openNode superseded this one while we awaited
+    const back = state.graph.links.filter(l => l.target === id).map(l => state.byId.get(l.source)).filter(Boolean);
+    const out = state.graph.links.filter(l => l.source === id).map(l => state.byId.get(l.target)).filter(Boolean);
+    let html = `<div class="row"><button class="icon" id="navBack" title="Back">←</button><button class="icon" id="navFwd" title="Forward">→</button><span class="grow"></span><span class="chip"><span class="dot k-${n.kind}"></span>${KIND_LABEL[n.kind]}</span><button class="icon" id="navFocus" title="Fly to node">⌖</button><button class="icon" id="navLocal" title="Local graph (1 hop)">◎</button></div>`;
+    html += `<div class="path">${esc(n.path || n.id)}</div><h2 class="title">${esc(view ? view.title : n.title)}</h2>`;
+    html += n.uncited ? `<div class="small muted">raw source not cited by any wiki page yet (not in the graph)</div>` : `<div class="small muted">in ${n.in_degree} · out ${n.out_degree} · hub rank #${n.hub_rank}${n.type ? ' · ' + esc(n.type) : ''}</div>`;
+    if (view && view.frontmatter && typeof view.frontmatter === 'object') {
+      html += `<h3>Properties</h3><table class="props">${Object.entries(view.frontmatter).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${fmValue(k, v)}</td></tr>`).join('')}</table>`;
+    }
+    if (view) html += `<div class="body">${view.html}</div>`;
+    else if (err) html += `<div class="muted">${esc(err)}</div>`;
+    else if (n.kind === 'tag') html += `<p class="muted">Tag — pages carrying it are listed under linked mentions.</p>`;
+    else if (n.kind === 'missing') html += `<p class="muted">Unresolved link: no page named <code>${esc(n.id)}</code> exists yet.</p>`;
+    else if (n.kind === 'cross_vault') html += `<p class="muted">Reference into another vault (<code>${esc(n.id)}</code>).</p>`;
+    html += `<h3>Linked mentions <span class="muted">${back.length}</span></h3>${linkedList(back)}`;
+    html += `<h3>Outgoing links <span class="muted">${out.length}</span></h3>${linkedList(out)}`;
+    noteEl.innerHTML = html;
+    noteEl.scrollTop = 0;
+    noteEl.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openNode(el.dataset.open)));
+    noteEl.querySelectorAll('a.wikilink').forEach(a => a.addEventListener('click', (e) => { e.preventDefault(); openNode(a.dataset.slug); }));
+    noteEl.querySelectorAll('[data-tag]').forEach(el => { el.style.cursor = 'pointer'; el.addEventListener('click', () => openNode('#' + el.dataset.tag)); });
+    $('#navBack').onclick = () => history.back();
+    $('#navFwd').onclick = () => history.forward();
+    $('#navFocus').onclick = () => flyTo(n);
+    $('#navLocal').onclick = () => { state.depth = state.depth ? 0 : 1; $('#depth').value = state.depth; $('#depthVal').textContent = state.depth || 'off'; applyFilters(); };
+  }
+  window.addEventListener('popstate', () => routeFromHash(false));
+  function routeFromHash(push) {
+    const m = location.hash.match(/^#\/note\/(.+)$/);
+    if (m) openNode(decodeURIComponent(m[1]), { push });
+  }
+
+  // ---------- Search ----------
+  let searchTimer, searchSeq = 0;
+  $('#q').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 300); });
+  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(true); } });
+  async function runSearch(openTop) {
+    const q = $('#q').value.trim();
+    const seq = ++searchSeq;
+    if (!q) { state.highlight = null; $('#results').innerHTML = ''; $('#qStatus').textContent = ''; repaint(); return; }
+    $('#qStatus').textContent = 'searching…';
+    try {
+      const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=30');
+      const j = await r.json();
+      if (seq !== searchSeq) return;
+      if (!r.ok) { $('#qStatus').textContent = j.error || 'search failed'; return; }
+      $('#qStatus').textContent = j.hint ? j.hint : `${j.results.length} hits (hybrid BM25 + vector)`;
+      state.highlight = new Set(j.results.map(x => x.id));
+      $('#results').innerHTML = j.results.map(x => { const n = state.byId.get(x.id); return `<div class="hit" data-id="${esc(x.id)}"><div class="t"><span class="dot k-${n ? n.kind : 'missing'}"></span>${esc(x.title || x.id)} <span class="muted small">${x.score.toFixed(3)}</span></div><div class="s">${esc(x.snippet)}</div></div>`; }).join('');
+      $('#results').querySelectorAll('.hit').forEach(el => el.addEventListener('click', () => openNode(el.dataset.id)));
+      repaint();
+      if (openTop && j.results.length) openNode(j.results[0].id);
+    } catch (e) { $('#qStatus').textContent = String(e); }
+  }
+
+  // ---------- File tree ----------
+  function renderTree() {
+    const groups = [['concept', 'wiki/concepts'], ['entity', 'wiki/entities'], ['raw', 'raw']];
+    $('#tree').innerHTML = groups.map(([k, label]) => {
+      const items = state.graph.nodes.filter(n => n.kind === k).sort((a, b) => a.id.localeCompare(b.id));
+      if (!items.length) return '';
+      return `<details class="tree" ${k === 'concept' ? 'open' : ''}><summary>${label} <span class="muted">${items.length}</span></summary>${items.map(n => `<div class="item" data-open="${esc(n.id)}" title="${esc(n.title)}"><span class="dot k-${k}"></span>${esc(k === 'raw' ? n.id.replace(/^raw:/, '') : n.id)}</div>`).join('')}</details>`;
+    }).join('');
+    $('#tree').querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openNode(el.dataset.open)));
+  }
+
+  // ---------- Filters UI ----------
+  function initFilterUi() {
+    const maxIn = maxInDegree();
+    const slider = $('#hubThresh'); slider.max = maxIn + 1;
+    if (state.hubThresh !== Infinity && state.hubThresh > maxIn) state.hubThresh = Infinity;
+    slider.value = state.hubThresh === Infinity ? maxIn + 1 : state.hubThresh;
+    const showThresh = () => { $('#hubThreshVal').textContent = state.hubThresh === Infinity ? '∞ (none)' : state.hubThresh; };
+    slider.oninput = () => { const v = +slider.value; state.hubThresh = v > maxIn ? Infinity : v; showThresh(); applyFilters(); };
+    $('#hubReset').onclick = () => { slider.value = maxIn + 1; state.hubThresh = Infinity; state.manualHidden.clear(); state.manualShown.clear(); showThresh(); applyFilters(); };
+    showThresh();
+    document.querySelectorAll('.hubKind').forEach(cb => cb.onchange = () => { cb.checked ? state.hubKinds.add(cb.value) : state.hubKinds.delete(cb.value); applyFilters(); });
+    $('#onlyHubs').onchange = (e) => { state.onlyHubs = e.target.checked; applyFilters(); };
+    $('#clusterColor').onchange = (e) => { state.clusterColor = e.target.checked; applyFilters(); repaint(); };
+    $('#orphans').onchange = (e) => { state.orphans = e.target.checked; applyFilters(); };
+    $('#depth').oninput = (e) => { state.depth = +e.target.value; $('#depthVal').textContent = state.depth || 'off'; applyFilters(); };
+    let tT; $('#fText').oninput = (e) => { clearTimeout(tT); tT = setTimeout(() => { state.text = e.target.value.trim().toLowerCase(); applyFilters(); }, 200); };
+    const types = [...new Set(state.graph.nodes.map(n => n.type).filter(Boolean))].sort();
+    const tags = [...new Set(state.graph.nodes.flatMap(n => n.tags))].sort();
+    state.types = new Set([...state.types].filter(t => types.includes(t)));
+    state.tags = new Set([...state.tags].filter(t => tags.includes(t)));
+    $('#fTypes').innerHTML = types.map(t => `<option value="${esc(t)}" ${state.types.has(t) ? 'selected' : ''}>${esc(t)}</option>`).join('');
+    $('#fTags').innerHTML = tags.map(t => `<option value="${esc(t)}" ${state.tags.has(t) ? 'selected' : ''}>#${esc(t)}</option>`).join('');
+    $('#fTypes').onchange = (e) => { state.types = new Set([...e.target.selectedOptions].map(o => o.value)); applyFilters(); };
+    $('#fTags').onchange = (e) => { state.tags = new Set([...e.target.selectedOptions].map(o => o.value)); applyFilters(); };
+    $('#clearSel').onclick = () => { $('#fTypes').selectedIndex = -1; $('#fTags').selectedIndex = -1; state.types.clear(); state.tags.clear(); applyFilters(); };
+    const charge = $('#charge'), linkDist = $('#linkDist');
+    const upd = () => { $('#chargeVal').textContent = charge.value; $('#linkDistVal').textContent = linkDist.value; };
+    charge.oninput = () => { upd(); Graph.d3Force('charge').strength(-charge.value); Graph.d3ReheatSimulation(); };
+    linkDist.oninput = () => { upd(); Graph.d3Force('link').distance(+linkDist.value); Graph.d3ReheatSimulation(); };
+    upd();
+    $('#particles').onchange = (e) => Graph.linkDirectionalParticles(e.target.checked ? 2 : 0);
+  }
+  // ---------- Header / misc ----------
+  $('#btnLeft').onclick = () => $('#app').classList.toggle('no-left');
+  $('#btnRight').onclick = () => $('#app').classList.toggle('no-right');
+  $('#btnFilters').onclick = () => { $('#filters').classList.toggle('hidden'); $('#btnFilters').classList.toggle('active'); };
+  $('#btnFit').onclick = () => Graph.zoomToFit(600, 40, n => state.visibleIds.has(n.id));
+  $('#btnTheme').onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('okf-theme', t); Graph.backgroundColor(css('--graph-bg')); repaint(); };
+  $('#btnRefresh').onclick = async () => { toast('Rebuilding graph…'); await fetch('/api/refresh', { method: 'POST' }); await load(); toast('Graph refreshed'); };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '/' && document.activeElement !== $('#q') && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); $('#q').focus(); $('#q').select(); }
+    if (e.key === 'Escape') {
+      $('#q').value = ''; state.highlight = null; $('#results').innerHTML = ''; $('#qStatus').textContent = '';
+      state.selected = null;
+      if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+      if (state.depth > 0) applyFilters(); else repaint();
+      $('#q').blur();
+    }
+  });
+  const savedTheme = localStorage.getItem('okf-theme'); if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+  if (window.innerWidth < 1100) $('#app').classList.add('no-right');
+  if (window.innerWidth < 800) $('#app').classList.add('no-left');
+  new ResizeObserver(() => { const r = $('#stage').getBoundingClientRect(); Graph.width(r.width).height(r.height); }).observe($('#stage'));
+
+  // ---------- Load ----------
+  async function load() {
+    const [info, graph] = await Promise.all([fetch('/api/info').then(r => r.json()), fetch('/api/graph').then(r => r.json())]);
+    $('#vaultName').textContent = '· ' + info.vault_name;
+    $('#stats').textContent = `${info.nodes} nodes · ${info.links} links` + (info.unparsed_pages ? ` · ${info.unparsed_pages} unparsed page(s)` : '');
+    document.title = `OKF Explorer · ${info.vault_name}`;
+    // Preserve positions of nodes that already exist across a refresh.
+    const old = state.byId;
+    graph.nodes.forEach(n => { const o = old.get(n.id); if (o && o.x !== undefined) { n.x = o.x; n.y = o.y; n.z = o.z; n.vx = o.vx; n.vy = o.vy; n.vz = o.vz; } n.tags = n.tags || []; });
+    state.graph = graph;
+    state.byId = new Map(graph.nodes.map(n => [n.id, n]));
+    state.neighbors = new Map();
+    for (const l of graph.links) { if (!state.neighbors.has(l.source)) state.neighbors.set(l.source, new Set()); if (!state.neighbors.has(l.target)) state.neighbors.set(l.target, new Set()); state.neighbors.get(l.source).add(l.target); state.neighbors.get(l.target).add(l.source); }
+    Graph.backgroundColor(css('--graph-bg'));
+    renderLegend(); renderTree(); initFilterUi(); applyFilters();
+    if (state.selected && !state.byId.has(state.selected)) state.selected = null;
+  }
+  load().then(() => routeFromHash(false)).catch(e => { toast('Failed to load: ' + e); console.error(e); });
+})();
+</script>
+</body>
+</html>

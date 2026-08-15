@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod compiler;
 pub mod core;
+pub mod explorer;
 pub mod http;
 pub mod ingest;
 pub mod manifest;

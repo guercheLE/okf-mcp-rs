@@ -1,6 +1,6 @@
-//! The `okf-mcp` MCP tool surface: 12 fixed, well-defined tools (ingest,
+//! The `okf-mcp` MCP tool surface: 13 fixed, well-defined tools (ingest,
 //! compile, rebuild, synthesize-next, synthesize-submit, lint, reindex,
-//! search, delete, read-index, read-concept, list-vaults) over a
+//! search, delete, read-index, read-concept, list-vaults, explore) over a
 //! Git-native OKF knowledge vault.
 //!
 //! Deliberately not framed as a discovery layer over an unknown API
@@ -227,6 +227,19 @@ pub struct ReadConceptArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListVaultsArgs {}
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExploreArgs {
+    #[serde(default)]
+    pub vault: Option<String>,
+    /// Also launch the machine's default browser at the explorer URL
+    /// (default: true). The URL is returned either way.
+    #[serde(default)]
+    pub open: Option<bool>,
+    /// Port to listen on; omitted/0 picks a free one
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
 /// A pending job never submitted within this long is dropped — a safety
 /// net against an abandoned client session leaking memory forever, not
 /// something normal use should ever hit.
@@ -317,6 +330,10 @@ pub struct OkfServer {
     /// session, never a security boundary, so there's no reason to pull in
     /// an RNG dependency for them.
     synthesize_job_counter: Arc<AtomicU64>,
+    /// Running `okf-explore` servers, keyed by canonical vault root, so a
+    /// second call for the same vault returns the existing URL instead of
+    /// starting another server. Session-scoped like everything else here.
+    explorers: Arc<Mutex<HashMap<PathBuf, crate::explorer::ExplorerHandle>>>,
 }
 
 #[tool_router]
@@ -328,6 +345,7 @@ impl OkfServer {
             tool_router: Self::tool_router(),
             synthesize_jobs: Arc::new(Mutex::new(HashMap::new())),
             synthesize_job_counter: Arc::new(AtomicU64::new(1)),
+            explorers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -764,6 +782,46 @@ impl OkfServer {
     }
 
     #[tool(
+        name = "okf-explore",
+        description = "Start (or reuse) a local browser-based explorer for the vault — 3D link graph, note pane with backlinks, hub filtering, and search over the vault's index — and return its URL."
+    )]
+    async fn explore(
+        &self,
+        Parameters(args): Parameters<ExploreArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let explorers = self.explorers.clone();
+        self.run_tool("okf-explore", async move {
+            let vault_root = resolve_vault(args.vault.as_deref())?;
+            let key = vault_root.canonicalize().unwrap_or(vault_root.clone());
+            let open = args.open.unwrap_or(true);
+            let mut explorers = explorers.lock().await;
+            if let Some(handle) = explorers.get(&key)
+                && !handle.task.is_finished()
+            {
+                if open && let Err(err) = open::that_detached(&handle.url) {
+                    tracing::warn!(error = %err, "could not open a browser");
+                }
+                return Ok(serde_json::json!({
+                    "url": handle.url,
+                    "vault_root": vault_root.display().to_string(),
+                    "already_running": true,
+                }));
+            }
+            let handle =
+                crate::explorer::serve(&vault_root, "127.0.0.1", args.port.unwrap_or(0), open)
+                    .await?;
+            let url = handle.url.clone();
+            explorers.insert(key, handle);
+            Ok(serde_json::json!({
+                "url": url,
+                "vault_root": vault_root.display().to_string(),
+                "already_running": false,
+            }))
+        })
+        .await
+    }
+
+    #[tool(
         name = "okf-list-vaults",
         description = "List every vault registered on this machine."
     )]
@@ -966,10 +1024,10 @@ impl ServerHandler for OkfServer {
             .with_instructions(
                 "A Git-native OKF (Open Knowledge Format) knowledge vault: ingest web pages \
                  (via Firecrawl) or local files, compile them into a linked wiki with an LLM, \
-                 lint the result, and search it. Twelve fixed tools: okf-ingest, okf-compile, \
+                 lint the result, and search it. Thirteen fixed tools: okf-ingest, okf-compile, \
                  okf-rebuild, okf-synthesize-next, okf-synthesize-submit, okf-lint, \
                  okf-reindex, okf-search, okf-delete, okf-read-index, okf-read-concept, \
-                 okf-list-vaults. Prefer okf-synthesize-next/okf-synthesize-submit over \
+                 okf-list-vaults, okf-explore. Prefer okf-synthesize-next/okf-synthesize-submit over \
                  okf-compile/okf-rebuild when you (the calling client) have your own LLM — \
                  they use it directly instead of requiring a separately configured provider."
                     .to_string(),
@@ -1424,6 +1482,7 @@ mod tests {
             vec![
                 "okf-compile",
                 "okf-delete",
+                "okf-explore",
                 "okf-ingest",
                 "okf-lint",
                 "okf-list-models",

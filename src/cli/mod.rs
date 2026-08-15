@@ -7,6 +7,7 @@ pub mod compile;
 pub mod config;
 pub mod credentials;
 pub mod delete;
+pub mod explore;
 pub mod ingest;
 pub mod lint;
 pub mod models;

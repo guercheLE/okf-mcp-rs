@@ -153,6 +153,21 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// Open the vault in a browser-based explorer: 3D link graph (notes,
+    /// tags, raw sources), note pane with backlinks, hub filtering to
+    /// reveal clusters, and search over the vault's own index
+    Explore {
+        /// Interface to bind (local viewer — keep it loopback unless you
+        /// know why not)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on; 0 picks a free one
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Print the URL instead of opening the default browser
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Ingest, compile, lint, and commit a source as one step
     Run {
         source: String,
@@ -357,6 +372,11 @@ async fn main() -> anyhow::Result<()> {
             all_vaults,
         } => cli::search::run(&query, limit, json, all_vaults, vault),
         Command::Delete { source, purge } => cli::delete::run(&source, purge, vault),
+        Command::Explore {
+            host,
+            port,
+            no_open,
+        } => cli::explore::run(&host, port, no_open, vault).await,
         Command::Run {
             source,
             tag,
