@@ -125,7 +125,7 @@ okf-mcp --vault my-notes explore --port 8765 --no-open
 - **Filters** — text filter, type / tag multiselect, per-kind visibility (legend), orphans-only, local graph (1–3 hops from the selected node), force sliders, link particles, labels.
 - **Note pane** — rendered Markdown with clickable wikilinks, the *complete* frontmatter as a properties table (`sources` link to their raw files, tags to their tag node), **linked mentions** (backlinks) and outgoing links; browser back/forward work (`#/note/<slug>` routing).
 - **Search** — the vault's own hybrid BM25 + vector index via the same code path as `okf-mcp search`; hits are highlighted in the graph. Run `okf-mcp reindex --embeddings` first if the vault was never indexed.
-- **Files** sidebar, ↻ Refresh (rebuilds the graph from disk), light/dark theme, `/` to search, `Esc` to clear.
+- **Files** sidebar, ↻ Refresh (rebuilds the graph from disk), ⤢ Fit, ⟲ Re-layout (forget positions and lay the *visible* graph out again — the force simulation is reheated on every filter change, but a fresh layout is the cure for a graph left sparse by heavy filtering), light/dark theme, `/` to search, `Esc` to clear.
 
 The same explorer is available to MCP clients as `okf-explore` (returns the URL, optionally opens the browser; a second call for the same vault reuses the running server).
 

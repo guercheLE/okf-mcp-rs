@@ -117,6 +117,7 @@
     <div id="showing"></div>
     <div id="toolbar">
       <button class="icon" id="btnFit" title="Fit all visible nodes">⤢ Fit</button>
+      <button class="icon" id="btnRelayout" title="Forget positions and lay the visible graph out again from scratch (compacts a graph left sparse by filtering)">⟲ Re-layout</button>
       <button class="icon" id="btnReveal" title="Hide tag / raw / unresolved nodes, rank hubs by cross-cluster links, hide the top 30, colour by community">✨ Reveal clusters</button>
       <button class="icon" id="btnFilters" title="Filters">⚙ Filters</button>
     </div>
@@ -262,6 +263,10 @@
     .cooldownTicks(200);
   Graph.d3Force('charge').strength(-60);
   Graph.d3Force('link').distance(30);
+  // Fit the camera once the layout has settled (not on a timer — big graphs take longer).
+  let fitWhenSettled = false;
+  Graph.onEngineStop(() => { if (fitWhenSettled) { fitWhenSettled = false; Graph.zoomToFit(600, 40, n => state.visibleIds.has(n.id)); } });
+  const fitAfterLayout = () => { fitWhenSettled = true; };
   let lastClick = { id: null, t: 0 };
   Graph.onNodeClick(n => {
     const now = Date.now();
@@ -455,6 +460,10 @@
     const links = state.graph.links.filter(l => vis.has(l.source) && vis.has(l.target)).map(l => ({ source: l.source, target: l.target, kind: l.kind }));
     computeClusters(nodes, links);
     Graph.graphData({ nodes, links });
+    // Positions are kept across filter changes (so the picture doesn't jump), but the
+    // survivors were placed by forces that included the now-hidden nodes: reheat so
+    // they re-settle into a compact layout for what is actually visible.
+    Graph.d3ReheatSimulation();
     const hidden = state.graph.nodes.filter(n => state.visibleKinds.has(n.kind) && !vis.has(n.id) && (isHub(n) || state.manualHidden.has(n.id)));
     const perKind = {}; for (const h of hidden) perKind[h.kind] = (perKind[h.kind] || 0) + 1;
     $('#hubCount').textContent = (!hidden.length ? 'no hubs hidden' : `hiding ${hidden.length} hubs (${Object.entries(perKind).map(([k, v]) => v + ' ' + KIND_LABEL[k]).join(', ') || 'none'})`) + ` → ${state.clusterCount} island${state.clusterCount === 1 ? '' : 's'} of ≥2 nodes, ${state.singletonCount} isolated`;
@@ -652,7 +661,7 @@
       state.hubTop = Math.min(30, +slider.max); slider.value = state.hubTop;
       state.colorBy = 'community'; $('#colorBy').value = 'community';
       showTop(); applyFilters(); repaint(); toast('Tags/raw/unresolved hidden · top 30 cross-cluster hubs hidden · coloured by community');
-      setTimeout(() => Graph.zoomToFit(600, 40, n => state.visibleIds.has(n.id)), 1500);
+      fitAfterLayout();
     };
     $('#revealClusters').onclick = reveal; $('#btnReveal').onclick = reveal;
     $('#orphans').onchange = (e) => { state.orphans = e.target.checked; applyFilters(); };
@@ -679,6 +688,13 @@
   $('#btnRight').onclick = () => $('#app').classList.toggle('no-right');
   $('#btnFilters').onclick = () => { $('#filters').classList.toggle('hidden'); $('#btnFilters').classList.toggle('active'); };
   $('#btnFit').onclick = () => Graph.zoomToFit(600, 40, n => state.visibleIds.has(n.id));
+  $('#btnRelayout').onclick = () => {
+    for (const n of state.graph.nodes) if (state.visibleIds.has(n.id)) { delete n.x; delete n.y; delete n.z; delete n.vx; delete n.vy; delete n.vz; delete n.fx; delete n.fy; delete n.fz; }
+    const { nodes, links } = Graph.graphData();
+    Graph.graphData({ nodes, links }); Graph.d3ReheatSimulation();
+    fitAfterLayout();
+    toast('Re-laying out ' + state.visibleIds.size + ' visible nodes');
+  };
   $('#btnTheme').onclick = () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('okf-theme', t); Graph.backgroundColor(css('--graph-bg')); repaint(); if (state.selected) openNode(state.selected, { push: false }); };
   $('#btnRefresh').onclick = async () => { toast('Rebuilding graph…'); await fetch('/api/refresh', { method: 'POST' }); await load(); toast('Graph refreshed'); };
   window.addEventListener('keydown', (e) => {
