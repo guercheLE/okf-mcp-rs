@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.0] - 2026-08-15
 
 ### Added
 - `okf-mcp explore` and the `okf-explore` MCP tool: an Obsidian-style, browser-based explorer for a vault. A local, loopback-only server (random free port by default; `--port`, `--host`, `--no-open`) serves one self-contained, fully-offline page with a **3D force-directed link graph** (wiki pages, tags as their own nodes, cited raw sources, cross-vault references, unresolved links), a **note pane** (rendered Markdown with clickable wikilinks, the complete frontmatter as properties, linked mentions/backlinks, outgoing links, `#/note/<slug>` history routing), **filters** (text, type/tag, per-kind visibility, orphans, local graph depth, forces), and **search** over the vault's own hybrid BM25 + vector index (same code path as `okf-mcp search`, hits highlighted in the graph). Node size is inbound-link count, and a kind-agnostic **hub filter** ("hide hubs with in-degree ≥ N", per-kind scoping, top-hubs list, "color by cluster") strips the biggest hubs — a heavily-linked note as much as a popular tag — to expose the islands and clusters they otherwise glue together.
