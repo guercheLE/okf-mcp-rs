@@ -15,6 +15,9 @@ RUN apt-get update \
 
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+# `assets/` is embedded into the binary at compile time (`include_str!` in
+# src/explorer/server.rs) — without it the build fails, not just the feature.
+COPY assets ./assets
 
 # No compile-time content to embed: unlike the old generic-catalog scaffold
 # this project started as, an OKF vault is entirely runtime data (mounted
