@@ -22,6 +22,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+use crate::ingest::frontmatter::raw_id_from_filename;
 use crate::search;
 
 use super::graph::{Graph, build_graph};
@@ -259,17 +260,21 @@ struct SearchParams {
 
 /// Maps a search hit's vault-relative path onto the graph node id the
 /// frontend can highlight: `wiki/**/<slug>.md` → `<slug>`,
-/// `raw/<stem>.md` → `raw:<stem>`.
+/// `raw/<raw_id>[--<slug>].md` → `raw:<raw_id>` — via `raw_id_from_filename`
+/// so this agrees with `search::query::collect_documents`'s own
+/// `raw_id_from_filename` extraction regardless of which of the two (still
+/// identical, pre-slug) shapes the physical file is in.
 fn node_id_for_path(path: &str) -> String {
-    let stem = Path::new(path)
+    if path.starts_with("raw/")
+        && let Some(raw_id) = raw_id_from_filename(Path::new(path))
+    {
+        return format!("raw:{raw_id}");
+    }
+    Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or(path);
-    if path.starts_with("raw/") {
-        format!("raw:{stem}")
-    } else {
-        stem.to_string()
-    }
+        .unwrap_or(path)
+        .to_string()
 }
 
 async fn api_search(State(state): State<AppState>, Query(params): Query<SearchParams>) -> Response {

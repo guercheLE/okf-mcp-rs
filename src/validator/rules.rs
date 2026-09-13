@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::core::vault_resolver::wiki_content_dirs;
+use crate::ingest::frontmatter::{raw_id_from_resource, resolve_raw_path};
 use crate::manifest;
 
 use super::frontmatter::parse_wiki_page;
@@ -146,8 +147,9 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
         }
 
         for source in &page.sources {
-            let relative = source.trim_start_matches('/');
-            if !vault_root.join(relative).is_file() {
+            let resolves = raw_id_from_resource(source)
+                .is_some_and(|raw_id| resolve_raw_path(vault_root, &raw_id).is_ok());
+            if !resolves {
                 report
                     .missing_sources
                     .push((page.relative_path.clone(), source.clone()));

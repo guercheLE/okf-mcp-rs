@@ -530,8 +530,11 @@
   async function openNodeInner(id, push) {
     let n = state.byId.get(id);
     if (!n && id.startsWith('raw:')) {
-      // A raw source no page cites: not a graph node, but the API can still render it.
-      n = { id, title: id.slice(4), kind: 'raw', path: 'raw/' + id.slice(4) + '.md', tags: [], in_degree: 0, out_degree: 0, hub_rank: 0, uncited: true };
+      // A raw source no page cites: not a graph node, but the backend can
+      // still resolve and render it server-side by id — its physical
+      // filename (bare or slugged) isn't something the frontend can guess,
+      // so no `path` is fabricated here.
+      n = { id, title: id.slice(4), kind: 'raw', path: null, tags: [], in_degree: 0, out_degree: 0, hub_rank: 0, uncited: true };
     }
     if (!n) { toast('Not in graph: ' + id); return; }
     state.selected = id; state.hover = null;
@@ -541,7 +544,7 @@
     if (!n.uncited && !state.visibleIds.has(id)) toast('Node is hidden by the current filters');
     $('#app').classList.remove('no-right');
     let view = null, err = null;
-    if (n.path) {
+    if (n.path || n.uncited) {
       try { const r = await fetch('/api/page/' + encodeURIComponent(id).replace(/%2F/g, '/')); const j = await r.json(); if (r.ok) view = j; else err = j.error; }
       catch (e) { err = String(e); }
     }

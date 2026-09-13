@@ -15,11 +15,12 @@
 //! expose the islands/clusters those hubs otherwise glue together.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::core::vault_resolver::{sandbox_path, wiki_content_dirs};
+use crate::core::vault_resolver::wiki_content_dirs;
+use crate::ingest::frontmatter::{raw_id_from_resource, resolve_raw_path};
 use crate::validator::frontmatter::parse_wiki_page;
 use crate::validator::rules::markdown_files_in;
 use crate::validator::wikilink::{WikiLink, extract_wikilinks};
@@ -124,38 +125,20 @@ fn strip_anchor(slug: &str) -> &str {
     slug[..cut].trim()
 }
 
-/// `sources[].resource` is written like `/raw/raw_a1f448945f.md`; normalize
-/// to a vault-relative path plus its stem so both the node id and the
-/// on-disk lookup are stable regardless of a leading slash or `./`.
-fn normalize_source_resource(resource: &str) -> (String, String) {
-    let relative = resource
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_string();
-    let stem = Path::new(&relative)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&relative)
-        .to_string();
-    (relative, stem)
-}
-
-/// Best-effort title for a raw source: its `source_url:` if the raw blob
-/// parses, else the stem. Never fails — a raw node with a plain title beats
-/// a missing node.
-pub(crate) fn raw_source_title(vault_root: &Path, relative: &str, stem: &str) -> (String, bool) {
-    // `resource` is LLM/user-written frontmatter: resolve it through the
-    // sandbox so a `../` in it can't make the graph builder read outside
-    // the vault — an escaping resource is simply "not found".
-    let Ok(path) = sandbox_path(vault_root, relative) else {
-        return (stem.to_string(), false);
+/// Best-effort title and resolved path for a raw source: its `source_url:`
+/// if the raw blob resolves and parses, else `raw_id` itself as the title
+/// and `None` for the path. Never fails — a raw node with a plain title
+/// beats a missing node. Resolution goes through `resolve_raw_path`
+/// (identity, not a literal path built from `sources[].resource`), which
+/// also means a `resource` value that escapes the vault (a crafted `../`)
+/// can never make this read outside it: only a real `raw_id` match under
+/// `./raw/` is ever opened.
+pub(crate) fn raw_source_title(vault_root: &Path, raw_id: &str) -> (String, Option<PathBuf>) {
+    let Ok(path) = resolve_raw_path(vault_root, raw_id) else {
+        return (raw_id.to_string(), None);
     };
-    if !path.is_file() {
-        return (stem.to_string(), false);
-    }
     let Ok(content) = std::fs::read_to_string(&path) else {
-        return (stem.to_string(), true);
+        return (raw_id.to_string(), Some(path));
     };
     let title = content
         .strip_prefix("---\n")
@@ -167,8 +150,8 @@ pub(crate) fn raw_source_title(vault_root: &Path, relative: &str, stem: &str) ->
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| stem.to_string());
-    (title, true)
+        .unwrap_or_else(|| raw_id.to_string());
+    (title, Some(path))
 }
 
 struct PendingNode {
@@ -482,20 +465,25 @@ pub fn build_graph(vault_root: &Path) -> anyhow::Result<Graph> {
             });
         }
         for resource in &page.sources {
-            let (relative, stem) = normalize_source_resource(resource);
-            if stem.is_empty() {
+            let Some(raw_id) = raw_id_from_resource(resource) else {
                 continue;
-            }
-            let id = format!("raw:{stem}");
+            };
+            let id = format!("raw:{raw_id}");
             nodes.entry(id.clone()).or_insert_with(|| {
-                let (title, exists) = raw_source_title(vault_root, &relative, &stem);
+                let (title, resolved) = raw_source_title(vault_root, &raw_id);
+                let relative = resolved.map(|path| {
+                    path.strip_prefix(vault_root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                });
                 PendingNode {
                     title,
                     kind: "raw",
                     r#type: None,
-                    description: (!exists).then(|| "raw file not found".to_string()),
+                    description: relative.is_none().then(|| "raw file not found".to_string()),
                     tags: Vec::new(),
-                    path: exists.then_some(relative),
+                    path: relative,
                 }
             });
             links.insert(GraphLink {

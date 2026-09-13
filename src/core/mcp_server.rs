@@ -673,7 +673,6 @@ impl OkfServer {
                         "fix".to_string(),
                         serde_json::json!({
                             "fixed_frontmatter_typos": fix_report.fixed_frontmatter_typos,
-                            "fixed_sources": fix_report.fixed_sources,
                         }),
                     );
                 }
@@ -935,7 +934,6 @@ fn compile_report_to_json(
                 "fix".to_string(),
                 serde_json::json!({
                     "fixed_frontmatter_typos": mechanical.fixed_frontmatter_typos,
-                    "fixed_sources": mechanical.fixed_sources,
                 }),
             );
         }

@@ -1,18 +1,23 @@
 //! Mechanical auto-repair for lint findings that have exactly one correct
-//! fix with no judgment call: a `sources[].resource` value that resolves
-//! once `.md` is appended. Broken links and orphan pages are never touched
-//! here — creating/renaming a concept page is a content decision, not a
-//! mechanical repair (see `compiler::link_fix` for the LLM-assisted
-//! counterpart that handles broken links, gated behind `compile`/`rebuild`
-//! since it needs a model and `lint` deliberately never does).
+//! fix with no judgment call: currently just a `tid:` frontmatter typo (see
+//! `fix_id_field_typos`). A `sources[].resource` value missing its `.md`
+//! extension *used* to be this module's other fix, back when
+//! `missing_sources` resolved a literal filesystem path — now that
+//! resolution goes through `raw_id_from_resource`/`resolve_raw_path`
+//! (identity, not exact filename), such a resource already resolves on its
+//! own and is never reported as missing in the first place, so there's
+//! nothing left here to mechanically repair for it. Broken links and orphan
+//! pages are never touched here either — creating/renaming a concept page
+//! is a content decision, not a mechanical repair (see `compiler::link_fix`
+//! for the LLM-assisted counterpart that handles broken links, gated behind
+//! `compile`/`rebuild` since it needs a model and `lint` deliberately never
+//! does).
 
-use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
 
 use crate::core::vault_resolver::wiki_content_dirs;
-use crate::storage::fs_ops;
 
 use super::frontmatter::parse_wiki_page;
 use super::rules::LintReport;
@@ -22,13 +27,11 @@ use super::rules::{lint_bundle, markdown_files_in};
 pub struct FixReport {
     /// wiki page paths where a `tid:` frontmatter field was renamed to `id:`
     pub fixed_frontmatter_typos: Vec<String>,
-    /// (wiki page path, old `resource` value, new `resource` value)
-    pub fixed_sources: Vec<(String, String, String)>,
 }
 
 impl FixReport {
     pub fn is_empty(&self) -> bool {
-        self.fixed_frontmatter_typos.is_empty() && self.fixed_sources.is_empty()
+        self.fixed_frontmatter_typos.is_empty()
     }
 }
 
@@ -96,63 +99,11 @@ fn fix_id_field_typos(vault_root: &Path) -> anyhow::Result<Vec<String>> {
 }
 
 /// Fixes known frontmatter field typos (currently: `tid:` -> `id:`), then
-/// scans for missing-`.md`-extension `sources[].resource` values and
-/// rewrites each in place via a targeted `"<old>"` -> `"<old>.md"` string
-/// replace (not a full YAML round-trip, to avoid reformatting hand-authored/
-/// LLM frontmatter), then re-lints so the returned `LintReport` is
-/// authoritative post-fix state.
+/// re-lints so the returned `LintReport` is authoritative post-fix state.
 pub fn fix_bundle(vault_root: &Path) -> anyhow::Result<(FixReport, LintReport)> {
-    let mut fix_report = FixReport {
+    let fix_report = FixReport {
         fixed_frontmatter_typos: fix_id_field_typos(vault_root)?,
-        ..Default::default()
     };
-
-    let initial = lint_bundle(vault_root)?;
-
-    let mut by_page: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (page, resource) in &initial.missing_sources {
-        by_page
-            .entry(page.clone())
-            .or_default()
-            .push(resource.clone());
-    }
-
-    for (page_relative, resources) in by_page {
-        let mut content = fs_ops::read_to_string(vault_root, &page_relative)?;
-        let mut changed = false;
-        let mut seen: HashSet<String> = HashSet::new();
-
-        for resource in resources {
-            if !seen.insert(resource.clone()) {
-                continue; // same unresolvable resource listed twice on this page
-            }
-            if resource.ends_with(".md") {
-                continue; // already has the extension; not this class of bug
-            }
-            let candidate = format!("{resource}.md");
-            let candidate_relative = candidate.trim_start_matches('/');
-            if !vault_root.join(candidate_relative).is_file() {
-                continue; // appending .md doesn't resolve it either — leave alone
-            }
-
-            let old_quoted = format!("\"{resource}\"");
-            let new_quoted = format!("\"{candidate}\"");
-            if content.contains(&old_quoted) {
-                // `.replace` rewrites every occurrence, so a resource
-                // listed twice in this page's `sources:` gets fixed in one
-                // pass without a second, redundant edit.
-                content = content.replace(&old_quoted, &new_quoted);
-                changed = true;
-                fix_report
-                    .fixed_sources
-                    .push((page_relative.clone(), resource, candidate));
-            }
-        }
-
-        if changed {
-            fs_ops::write(vault_root, &page_relative, &content)?;
-        }
-    }
 
     let post_fix_report = lint_bundle(vault_root)?;
     Ok((fix_report, post_fix_report))
@@ -170,15 +121,6 @@ pub fn summary_line(report: &FixReport) -> String {
         ));
         for page in &report.fixed_frontmatter_typos {
             lines.push(format!("  {page}"));
-        }
-    }
-    if !report.fixed_sources.is_empty() {
-        lines.push(format!(
-            "Fixed {} missing-source-extension issue(s):",
-            report.fixed_sources.len()
-        ));
-        for (page, old, new) in &report.fixed_sources {
-            lines.push(format!("  {page}: \"{old}\" -> \"{new}\""));
         }
     }
     lines.join("\n")
@@ -252,26 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn fixes_a_missing_dot_md_extension_when_the_real_file_exists() {
+    fn a_resource_missing_the_dot_md_extension_already_resolves_so_theres_nothing_to_fix() {
+        // `missing_sources` (validator::rules) now resolves `sources:`
+        // entries by `raw_id`, not literal filename — a resource missing
+        // its `.md` extension already resolves on its own, so this module
+        // never sees it as something to mechanically repair.
         let vault = tempfile::tempdir().unwrap();
         write_raw(vault.path(), "raw_aaa");
         write_concept(vault.path(), "a", &["/raw/raw_aaa"], "");
 
         let (fix_report, post_fix) = fix_bundle(vault.path()).unwrap();
 
-        assert_eq!(fix_report.fixed_sources.len(), 1);
-        assert_eq!(
-            fix_report.fixed_sources[0],
-            (
-                "wiki/concepts/a.md".to_string(),
-                "/raw/raw_aaa".to_string(),
-                "/raw/raw_aaa.md".to_string(),
-            )
-        );
+        assert!(fix_report.is_empty());
         assert!(post_fix.missing_sources.is_empty());
 
+        // The file is left byte-for-byte untouched — there was nothing to fix.
         let content = std::fs::read_to_string(vault.path().join("wiki/concepts/a.md")).unwrap();
-        assert!(content.contains("resource: \"/raw/raw_aaa.md\""));
+        assert!(content.contains("resource: \"/raw/raw_aaa\""));
     }
 
     #[test]
@@ -281,36 +220,8 @@ mod tests {
 
         let (fix_report, post_fix) = fix_bundle(vault.path()).unwrap();
 
-        assert!(fix_report.fixed_sources.is_empty());
+        assert!(fix_report.is_empty());
         assert_eq!(post_fix.missing_sources.len(), 1);
-    }
-
-    #[test]
-    fn does_not_touch_a_resource_that_already_ends_in_dot_md() {
-        let vault = tempfile::tempdir().unwrap();
-        write_concept(vault.path(), "a", &["/raw/raw_missing.md"], "");
-
-        let (fix_report, post_fix) = fix_bundle(vault.path()).unwrap();
-
-        assert!(fix_report.fixed_sources.is_empty());
-        assert_eq!(post_fix.missing_sources.len(), 1);
-    }
-
-    #[test]
-    fn a_duplicate_unresolvable_resource_on_one_page_is_fixed_without_corrupting_the_file() {
-        let vault = tempfile::tempdir().unwrap();
-        write_raw(vault.path(), "raw_aaa");
-        write_concept(vault.path(), "a", &["/raw/raw_aaa", "/raw/raw_aaa"], "");
-
-        let (fix_report, post_fix) = fix_bundle(vault.path()).unwrap();
-
-        assert_eq!(fix_report.fixed_sources.len(), 1);
-        assert!(post_fix.missing_sources.is_empty());
-
-        let content = std::fs::read_to_string(vault.path().join("wiki/concepts/a.md")).unwrap();
-        assert_eq!(content.matches("resource: \"/raw/raw_aaa.md\"").count(), 2);
-        // still parses as valid frontmatter
-        assert!(super::super::frontmatter::parse_wiki_page(&content).is_ok());
     }
 
     #[test]

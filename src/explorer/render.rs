@@ -12,6 +12,7 @@ use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, html
 use serde::Serialize;
 
 use crate::core::vault_resolver::sandbox_path;
+use crate::ingest::frontmatter::resolve_raw_path;
 
 use super::graph::Graph;
 
@@ -204,26 +205,31 @@ pub fn render_markdown(body: &str, is_missing: &dyn Fn(&str) -> bool) -> String 
     out
 }
 
-/// Renders the node `id` (a page slug or `raw:<stem>`) from `graph`. Reads
-/// the file through `sandbox_path`, so a crafted id can't escape the vault.
+/// Renders the node `id` (a page slug or `raw:<raw_id>`) from `graph`.
+/// Reads the file through `sandbox_path`, so a crafted id can't escape the
+/// vault.
 ///
-/// A `raw:<stem>` that isn't a graph node (a raw source no page cites yet —
-/// search still finds those) renders straight from `raw/<stem>.md`, so
-/// every search hit is openable.
+/// A `raw:<raw_id>` that isn't a graph node (a raw source no page cites
+/// yet — search still finds those) resolves via `resolve_raw_path` rather
+/// than a literal `raw/<raw_id>.md` path, so every search hit is openable
+/// regardless of whether its physical filename carries a slug.
 pub fn render_page(vault_root: &Path, graph: &Graph, id: &str) -> anyhow::Result<PageView> {
     let uncited_raw;
     let node = match graph.node(id) {
         Some(node) => node,
         None => {
-            let stem = id
+            let raw_id = id
                 .strip_prefix("raw:")
-                .filter(|stem| !stem.is_empty() && !stem.contains(['/', '\\']))
+                .filter(|raw_id| !raw_id.is_empty() && !raw_id.contains(['/', '\\']))
                 .ok_or_else(|| anyhow::anyhow!("no node '{id}' in this vault"))?;
-            let relative = format!("raw/{stem}.md");
-            if !sandbox_path(vault_root, &relative)?.is_file() {
-                anyhow::bail!("no node '{id}' in this vault");
-            }
-            let (title, _) = super::graph::raw_source_title(vault_root, &relative, stem);
+            let path = resolve_raw_path(vault_root, raw_id)
+                .map_err(|_| anyhow::anyhow!("no node '{id}' in this vault"))?;
+            let relative = path
+                .strip_prefix(vault_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let (title, _) = super::graph::raw_source_title(vault_root, raw_id);
             uncited_raw = super::graph::GraphNode {
                 id: id.to_string(),
                 title,

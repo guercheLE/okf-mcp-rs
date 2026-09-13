@@ -21,8 +21,7 @@ pub fn run(strict: bool, json: bool, fix: bool, vault: Option<&str>) -> anyhow::
             object.insert(
                 "fix".to_string(),
                 serde_json::json!({
-                    "fixed_count": fix_report.fixed_sources.len(),
-                    "fixed": fix_report.fixed_sources,
+                    "fixed_frontmatter_typos": fix_report.fixed_frontmatter_typos,
                 }),
             );
         }

@@ -110,7 +110,7 @@ pub(crate) async fn report_and_commit(
         let (mechanical, after_mechanical) = validator::fix_bundle(vault_root)?;
         if !mechanical.is_empty() {
             output.line(&validator::fix::summary_line(&mechanical));
-            fixed_paths.extend(mechanical.fixed_sources.iter().map(|(p, _, _)| p.clone()));
+            fixed_paths.extend(mechanical.fixed_frontmatter_typos.iter().cloned());
         }
         lint_report = after_mechanical;
 
@@ -347,17 +347,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fix_repairs_a_missing_dot_md_source_and_commits_it_without_a_prompt() {
+    async fn fix_true_leaves_a_source_missing_its_dot_md_extension_untouched_since_it_already_resolves()
+     {
+        // `validator::rules::missing_sources` now resolves `sources:` by
+        // `raw_id`, not literal filename, so a resource missing its `.md`
+        // extension already resolves and lint reports no error — there's
+        // nothing left for `--fix`'s mechanical pass to repair here, and
+        // the page must be committed byte-for-byte as written.
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
         std::fs::create_dir_all(vault.path().join("raw")).unwrap();
         std::fs::write(vault.path().join("raw/raw_aaa.md"), "content").unwrap();
         std::fs::create_dir_all(vault.path().join("wiki/concepts")).unwrap();
-        std::fs::write(
-            vault.path().join("wiki/concepts/a.md"),
-            "---\nokf_version: \"0.2\"\ntype: concept\nid: concept_a\ntitle: \"a\"\nsources:\n  - resource: \"/raw/raw_aaa\"\n---\n\n# a\n",
-        )
-        .unwrap();
+        let original = "---\nokf_version: \"0.2\"\ntype: concept\nid: concept_a\ntitle: \"a\"\nsources:\n  - resource: \"/raw/raw_aaa\"\n---\n\n# a\n";
+        std::fs::write(vault.path().join("wiki/concepts/a.md"), original).unwrap();
         std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
         init_repo(vault.path());
 
@@ -374,7 +377,7 @@ mod tests {
 
         assert!(result.is_ok(), "{result:?}");
         let content = std::fs::read_to_string(vault.path().join("wiki/concepts/a.md")).unwrap();
-        assert!(content.contains("resource: \"/raw/raw_aaa.md\""));
+        assert_eq!(content, original);
         let log = run_git(vault.path(), &["log", "--oneline"]);
         assert!(!String::from_utf8_lossy(&log.stdout).trim().is_empty());
     }

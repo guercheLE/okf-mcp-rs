@@ -28,6 +28,18 @@ pub struct SourceVersion {
     pub raw_id: String,
     pub hash: String,
     pub ingested_at: String,
+    /// Vault-relative on-disk path of this version's raw blob
+    /// (`raw/<raw_id>.md` today; a slugged `raw/<raw_id>--<slug>.md` once
+    /// phase 2 of the raw-filename change lands), populated at write time
+    /// by `ingest::pipeline::process_ingest` once the blob is actually
+    /// written — `record_ingest` itself runs *before* that write, so it
+    /// can't populate this field directly (see `Manifest::record_raw_path`).
+    /// `#[serde(default)]` so entries recorded before this field existed
+    /// deserialize with `None` rather than failing — `resolve_raw_path`
+    /// falls back to a directory scan for those, no migration needed,
+    /// matching the existing `compiled_hash`-style backward-compat pattern.
+    #[serde(default)]
+    pub raw_path: Option<String>,
     #[serde(flatten)]
     pub status: SourceStatus,
 }
@@ -112,6 +124,7 @@ impl Manifest {
             raw_id: raw_id.to_string(),
             hash: hash.to_string(),
             ingested_at: ingested_at.to_string(),
+            raw_path: None,
             status: SourceStatus::Active,
         });
         entry.active_hash = Some(hash.to_string());
@@ -174,6 +187,37 @@ impl Manifest {
     pub fn is_compiled_at_current_hash(&self, uri: &str) -> bool {
         self.sources.get(uri).is_some_and(|entry| {
             entry.compiled_hash.is_some() && entry.compiled_hash == entry.active_hash
+        })
+    }
+
+    /// Populates `raw_path` on the `SourceVersion` identified by `raw_id`
+    /// within `uri`'s history, once its physical file has actually been
+    /// written (`record_ingest` runs first and can't know the path yet —
+    /// see `ingest::pipeline::process_ingest`, the only real caller). A
+    /// no-op if `uri`/`raw_id` aren't found, which should never happen
+    /// given the caller's own invariant of calling this right after
+    /// `record_ingest` returned that exact `raw_id`.
+    pub fn record_raw_path(&mut self, uri: &str, raw_id: &str, raw_path: String) {
+        if let Some(entry) = self.sources.get_mut(uri)
+            && let Some(version) = entry.history.iter_mut().find(|v| v.raw_id == raw_id)
+        {
+            version.raw_path = Some(raw_path);
+        }
+    }
+
+    /// The recorded `raw_path` for `raw_id`, searched across every source's
+    /// entire history (not just active entries) — `resolve_raw_path` needs
+    /// to find a raw_id's physical file even after it's been superseded or
+    /// tombstoned, since the blob itself stays on disk; only its manifest
+    /// status changes. `None` when never recorded (pre-this-field entries,
+    /// or a `raw_id` the manifest doesn't know at all).
+    pub fn raw_path_for(&self, raw_id: &str) -> Option<&str> {
+        self.sources.values().find_map(|entry| {
+            entry
+                .history
+                .iter()
+                .find(|version| version.raw_id == raw_id)
+                .and_then(|version| version.raw_path.as_deref())
         })
     }
 
@@ -318,6 +362,52 @@ mod tests {
         let json = r#"{"sources":{"uri":{"active_hash":"sha256:aaa","history":[]}}}"#;
         let manifest: Manifest = serde_json::from_str(json).unwrap();
         assert_eq!(manifest.sources["uri"].compiled_hash, None);
+    }
+
+    #[test]
+    fn a_source_version_json_without_the_raw_path_field_still_deserializes() {
+        let json = r#"{"sources":{"uri":{"active_hash":"sha256:aaa","history":[
+            {"raw_id":"raw_aaa","hash":"sha256:aaa","ingested_at":"t0","status":"ACTIVE"}
+        ]}}}"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.sources["uri"].history[0].raw_path, None);
+    }
+
+    #[test]
+    fn record_raw_path_sets_it_on_the_matching_history_entry() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.record_raw_path("uri", "raw_aaa", "raw/raw_aaa.md".to_string());
+
+        assert_eq!(
+            manifest.sources["uri"].history[0].raw_path.as_deref(),
+            Some("raw/raw_aaa.md")
+        );
+        assert_eq!(manifest.raw_path_for("raw_aaa"), Some("raw/raw_aaa.md"));
+    }
+
+    #[test]
+    fn record_raw_path_on_an_unknown_uri_or_raw_id_is_a_no_op() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.record_raw_path("nope", "raw_aaa", "raw/raw_aaa.md".to_string());
+        manifest.record_raw_path("uri", "raw_zzz", "raw/raw_zzz.md".to_string());
+
+        assert_eq!(manifest.sources["uri"].history[0].raw_path, None);
+    }
+
+    #[test]
+    fn raw_path_for_finds_a_superseded_versions_path_too() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.record_raw_path("uri", "raw_aaa", "raw/raw_aaa.md".to_string());
+        manifest.record_ingest("uri", "sha256:bbb", "raw_bbb", "t1");
+
+        // raw_aaa is now Superseded, but its blob is still on disk and its
+        // recorded path must still be findable.
+        assert_eq!(manifest.raw_path_for("raw_aaa"), Some("raw/raw_aaa.md"));
+        assert_eq!(manifest.raw_path_for("raw_bbb"), None);
+        assert_eq!(manifest.raw_path_for("raw_nonexistent"), None);
     }
 
     #[test]

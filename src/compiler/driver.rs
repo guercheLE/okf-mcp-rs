@@ -225,7 +225,9 @@ pub(crate) fn select_sources(
 }
 
 pub(crate) fn read_raw_body(vault_root: &Path, raw_id: &str) -> anyhow::Result<String> {
-    let content = fs_ops::read_to_string(vault_root, &format!("raw/{raw_id}.md"))?;
+    let path = crate::ingest::frontmatter::resolve_raw_path(vault_root, raw_id)?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|err| anyhow::anyhow!("cannot read raw file for '{raw_id}': {err}"))?;
     let (_, body) = crate::search::query::raw_title_and_body(&content);
     Ok(body)
 }

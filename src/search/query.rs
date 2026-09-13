@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::core::output::{Output, ProgressEvent};
 use crate::core::vault_resolver::wiki_content_dirs;
-use crate::ingest::frontmatter::hash_content;
+use crate::ingest::frontmatter::{hash_content, raw_id_from_filename};
 use crate::manifest;
 use crate::services::embedding_service::embed;
 use crate::validator::rules::markdown_files_in;
@@ -63,22 +63,25 @@ fn collect_documents(vault_root: &Path) -> anyhow::Result<Vec<CollectedDocument>
             if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
                 continue;
             }
-            let stem = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or_default();
-            if !active_raw_ids.contains(stem) {
+            let Some(raw_id) = raw_id_from_filename(&path) else {
+                continue;
+            };
+            if !active_raw_ids.contains(&raw_id) {
                 continue;
             }
             let content = std::fs::read_to_string(&path)?;
             let (title, body) = raw_title_and_body(&content);
+            // The actual physical filename found on disk (not a literal
+            // `raw/{raw_id}.md` reconstruction) — `okf search` should
+            // always print something directly openable, slugged or not.
+            let relative = path
+                .strip_prefix(vault_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
             documents.push(CollectedDocument {
-                path: format!("raw/{stem}.md"),
-                title: if title.is_empty() {
-                    stem.to_string()
-                } else {
-                    title
-                },
+                path: relative,
+                title: if title.is_empty() { raw_id } else { title },
                 body,
                 doc_type: "raw".to_string(),
             });

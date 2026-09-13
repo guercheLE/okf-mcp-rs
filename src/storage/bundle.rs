@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::core::okf_schema::OKF_SCHEMA_VERSION;
 use crate::core::vault_resolver::{sandbox_path, wiki_content_dirs};
+use crate::ingest::frontmatter::resolve_raw_path;
 use crate::manifest;
 use crate::validator::frontmatter::parse_wiki_page;
 use crate::validator::rules::markdown_files_in;
@@ -29,6 +30,13 @@ pub struct BundleRawSource {
     pub uri: String,
     pub raw_id: String,
     pub hash: String,
+    /// Vault-relative on-disk path of this source's raw blob, resolved via
+    /// `resolve_raw_path` — recorded so external OKF consumers (without
+    /// this project's `raw_id`-based resolver) can still locate the file
+    /// from bundle metadata alone. Falls back to the pre-slug
+    /// `raw/<raw_id>.md` shape on the rare chance resolution itself fails
+    /// (e.g. the blob went missing outside this tool's own operations).
+    pub path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,10 +50,21 @@ pub fn build_bundle(vault_root: &Path) -> anyhow::Result<Bundle> {
     let manifest = manifest::store::load(vault_root)?;
     let mut raw_sources: Vec<BundleRawSource> = manifest
         .active_entries()
-        .map(|(uri, version)| BundleRawSource {
-            uri: uri.to_string(),
-            raw_id: version.raw_id.clone(),
-            hash: version.hash.clone(),
+        .map(|(uri, version)| {
+            let path = resolve_raw_path(vault_root, &version.raw_id)
+                .ok()
+                .and_then(|p| {
+                    p.strip_prefix(vault_root)
+                        .ok()
+                        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                })
+                .unwrap_or_else(|| format!("raw/{}.md", version.raw_id));
+            BundleRawSource {
+                uri: uri.to_string(),
+                raw_id: version.raw_id.clone(),
+                hash: version.hash.clone(),
+                path,
+            }
         })
         .collect();
     raw_sources.sort_by(|a, b| a.uri.cmp(&b.uri));
@@ -154,6 +173,34 @@ mod tests {
             bundle.concepts[0].sources,
             vec!["/raw/raw_aaa.md".to_string()]
         );
+    }
+
+    #[test]
+    fn a_raw_sources_path_field_is_the_actual_physical_relative_path() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+        std::fs::write(vault.path().join("raw/raw_aaa.md"), "content").unwrap();
+        let mut manifest = manifest::store::load(vault.path()).unwrap();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest::store::save(vault.path(), &manifest).unwrap();
+
+        let bundle = build_bundle(vault.path()).unwrap();
+        assert_eq!(bundle.raw_sources[0].path, "raw/raw_aaa.md");
+    }
+
+    #[test]
+    fn a_raw_sources_path_falls_back_to_the_bare_shape_when_the_blob_is_missing() {
+        // `resolve_raw_path` fails (no manifest raw_path, no matching file
+        // on disk) — the bundle must still emit a best-effort path rather
+        // than an empty string.
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        let mut manifest = manifest::store::load(vault.path()).unwrap();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest::store::save(vault.path(), &manifest).unwrap();
+
+        let bundle = build_bundle(vault.path()).unwrap();
+        assert_eq!(bundle.raw_sources[0].path, "raw/raw_aaa.md");
     }
 
     #[test]

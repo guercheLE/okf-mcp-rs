@@ -58,7 +58,7 @@ pub async fn process_ingest(
     let raw_path = match &outcome {
         IngestOutcome::NoOp => None,
         IngestOutcome::New { raw_id } | IngestOutcome::Superseded { raw_id, .. } => {
-            Some(frontmatter::write_raw_blob(
+            let path = frontmatter::write_raw_blob(
                 vault_root,
                 raw_id,
                 &source_uri,
@@ -66,7 +66,19 @@ pub async fn process_ingest(
                 &hash,
                 &ingested_at,
                 &content,
-            )?)
+            )?;
+            // `record_ingest` above ran before the raw blob existed, so it
+            // couldn't record where it landed — do that now that
+            // `write_raw_blob` has actually returned a path. Built as the
+            // literal `raw/{raw_id}.md` string (matching exactly what
+            // `write_raw_blob` writes in this phase) rather than
+            // `path.strip_prefix(vault_root)`: `write_raw_blob` resolves
+            // its returned path through `sandbox_path`, which canonicalizes
+            // the vault root, so on a host where the vault lives under a
+            // symlink (e.g. macOS's `/var` -> `/private/var`) that
+            // strip_prefix could silently fail and store an absolute path.
+            manifest.record_raw_path(&source_uri, raw_id, format!("raw/{raw_id}.md"));
+            Some(path)
         }
     };
 
@@ -135,10 +147,12 @@ pub fn delete_source(
             .ok_or_else(|| anyhow::anyhow!("no ingested source found for '{source_uri}'"))?;
         let mut removed_raw_ids = Vec::with_capacity(removed.history.len());
         for version in removed.history {
-            let _ = crate::storage::fs_ops::remove_file(
-                vault_root,
-                &format!("raw/{}.md", version.raw_id),
-            );
+            // Tolerant of the file already being gone, same as the old
+            // `fs_ops::remove_file` this replaces — `resolve_raw_path`
+            // erroring just means there's nothing left to unlink.
+            if let Ok(path) = frontmatter::resolve_raw_path(vault_root, &version.raw_id) {
+                let _ = std::fs::remove_file(path);
+            }
             removed_raw_ids.push(version.raw_id);
         }
         manifest::store::save(vault_root, &manifest)?;
