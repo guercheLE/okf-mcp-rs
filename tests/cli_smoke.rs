@@ -185,6 +185,7 @@ fn vault_create_scaffolds_a_new_vault_and_registers_it() {
     assert!(new_vault.path().join(".okf").is_dir());
     assert!(new_vault.path().join("wiki/concepts").is_dir());
     assert!(new_vault.path().join("raw").is_dir());
+    assert!(new_vault.path().join("wiki/schema.md").is_file());
 
     let list = okf_mcp(&["vault", "list"], home.path());
     assert!(stdout(&list).contains("created-vault"));

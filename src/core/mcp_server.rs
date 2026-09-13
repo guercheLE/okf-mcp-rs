@@ -545,6 +545,11 @@ impl OkfServer {
             // "regenerate once after all sources are applied" ordering).
             let mut vaults_to_reindex: std::collections::HashSet<PathBuf> =
                 std::collections::HashSet::new();
+            // (applied, errored) counts per vault touched by this batch —
+            // for this call's own `wiki/log.md` entry below, which (like
+            // the reindex above) is written once per vault rather than once
+            // per job.
+            let mut counts_by_vault: HashMap<PathBuf, (usize, usize)> = HashMap::new();
 
             for result in args.results {
                 let stored = {
@@ -581,6 +586,10 @@ impl OkfServer {
                     Ok(touched_paths) => {
                         jobs_map.lock().await.remove(&result.job_id);
                         vaults_to_reindex.insert(stored.vault_root.clone());
+                        counts_by_vault
+                            .entry(stored.vault_root.clone())
+                            .or_default()
+                            .0 += 1;
                         results_json.push(serde_json::json!({
                             "job_id": result.job_id,
                             "status": "applied",
@@ -594,6 +603,10 @@ impl OkfServer {
                         // Left in the map (not removed) so the client can
                         // retry with corrected output, bounded by the same
                         // TTL/cap eviction as any other pending job.
+                        counts_by_vault
+                            .entry(stored.vault_root.clone())
+                            .or_default()
+                            .1 += 1;
                         results_json.push(serde_json::json!({
                             "job_id": result.job_id,
                             "status": "error",
@@ -609,6 +622,17 @@ impl OkfServer {
             // otherwise-successful batch over.
             for vault_root in &vaults_to_reindex {
                 let _ = compiler::regenerate_index(vault_root);
+            }
+            // Also best-effort, for the same reason — see `wiki_log::append`'s
+            // own doc comment. One line per vault touched by this batch,
+            // not per job, mirroring the reindex loop just above.
+            for (vault_root, (applied, errored)) in &counts_by_vault {
+                let _ = crate::storage::wiki_log::append(
+                    vault_root,
+                    "okf-synthesize-submit",
+                    if *errored == 0 { "ok" } else { "error" },
+                    &format!("{applied} job(s) applied, {errored} failed"),
+                );
             }
 
             Ok(serde_json::json!({ "results": results_json }))
@@ -1200,6 +1224,10 @@ mod tests {
         let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
         assert!(index.contains("okf_version"));
         assert!(index.contains("Widgets"));
+
+        // Also logged — one line per vault touched by this batch.
+        let log = fs_ops::read_to_string(vault.path(), "wiki/log.md").unwrap();
+        assert!(log.contains("[okf-synthesize-submit] ok: 1 job(s) applied, 0 failed"));
 
         // A second next call has nothing left to compile and no broken
         // links to fix — straight to done.

@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use okf_mcp::compiler;
 use okf_mcp::core::output::Output;
 use okf_mcp::core::vault_registry::{VaultEntry, VaultRegistry};
 use okf_mcp::manifest::{self, Manifest};
@@ -70,6 +71,10 @@ pub fn create(path: &str, name: &str, description: Option<&str>) -> anyhow::Resu
     std::fs::create_dir_all(root.join("raw"))?;
     // Creates `.okf/` and writes an empty manifest.json.
     manifest::store::save(&root, &Manifest::default())?;
+    // Scaffolds `wiki/schema.md` up front — an existing vault picks this up
+    // lazily instead, the next time `regenerate_index` runs (see
+    // `compiler::ensure_wiki_schema`'s doc comment).
+    compiler::ensure_wiki_schema(&root)?;
 
     add(path, name, description)?;
     Output::cli().line(&format!("Created vault '{name}' at {path}"));

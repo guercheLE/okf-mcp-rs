@@ -527,6 +527,29 @@ where
     Ok((manifest, outcomes, touched_paths))
 }
 
+/// Static, hand-maintained documentation of this vault's own conventions
+/// (content-dir list, frontmatter shape, wikilink syntax) — framed as this
+/// project's own convention, not an OKF-spec requirement, since the spec
+/// itself doesn't define this file (only a `type:` field is required).
+const WIKI_SCHEMA_MD: &str = include_str!("../../assets/wiki-schema.md");
+
+/// Writes `wiki/schema.md` if (and only if) it doesn't already exist yet.
+///
+/// `cli::vault::create` scaffolds it eagerly for brand-new vaults, but
+/// `create` refuses to run against a non-empty directory, so an
+/// already-existing vault would otherwise never get one. Called from
+/// [`regenerate_index`] instead — every finalization path that regenerates
+/// the index already runs through there, so any pre-existing vault picks
+/// this file up on its very next compile/rebuild/synthesize-submit, with no
+/// separate migration step required.
+pub fn ensure_wiki_schema(vault_root: &Path) -> anyhow::Result<()> {
+    if fs_ops::exists(vault_root, "wiki/schema.md") {
+        return Ok(());
+    }
+    fs_ops::write(vault_root, "wiki/schema.md", WIKI_SCHEMA_MD)?;
+    Ok(())
+}
+
 /// Human-readable section heading for a `wiki_content_dirs` "kind" —
 /// `regenerate_index`'s only use of the kind label.
 fn index_heading_for_kind(kind: &str) -> String {
@@ -551,7 +574,14 @@ fn index_heading_for_kind(kind: &str) -> String {
 /// pages yet is omitted entirely rather than printing an empty heading. Per
 /// OKF v0.2 §12, the bundle-root `index.md` is the *one* place
 /// `okf_version` belongs — no other key is added here.
+///
+/// Also ensures `wiki/schema.md` exists (see [`ensure_wiki_schema`]) —
+/// every finalization path that regenerates the index runs through here,
+/// so this is the one place a pre-existing vault is guaranteed to pick the
+/// schema file up.
 pub fn regenerate_index(vault_root: &Path) -> anyhow::Result<()> {
+    ensure_wiki_schema(vault_root)?;
+
     let mut markdown = String::from("---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n");
 
     for (dir, kind) in wiki_content_dirs(vault_root) {
@@ -679,6 +709,18 @@ pub async fn compile(
 
     regenerate_index(vault_root)?;
     let lint_report = lint_bundle(vault_root)?;
+
+    let processed = outcomes.iter().filter(|s| s.error.is_none()).count();
+    let failed = outcomes.iter().filter(|s| s.error.is_some()).count();
+    // Best-effort: sources were already compiled and written to disk either
+    // way — a failure to append this human-readable summary must never
+    // fail (or misrepresent) an otherwise-real compile run.
+    let _ = crate::storage::wiki_log::append(
+        vault_root,
+        "compile",
+        if failed == 0 { "ok" } else { "error" },
+        &format!("{processed} source(s) processed, {failed} failed"),
+    );
 
     Ok(CompileReport {
         sources: outcomes,
@@ -1062,6 +1104,38 @@ mod tests {
         assert!(!index.contains("## Entities"));
         assert!(!index.contains("## Syntheses"));
         assert!(!index.contains("## Questions"));
+    }
+
+    #[test]
+    fn ensure_wiki_schema_writes_the_file_once() {
+        let vault = tempfile::tempdir().unwrap();
+        ensure_wiki_schema(vault.path()).unwrap();
+
+        let schema = fs_ops::read_to_string(vault.path(), "wiki/schema.md").unwrap();
+        assert!(schema.contains("wiki/concepts/"));
+        assert!(schema.contains("wiki/questions/"));
+
+        // A second call must not clobber an existing (possibly
+        // hand-edited) file — `ensure_wiki_schema` only ever writes when
+        // the file is absent.
+        fs_ops::write(vault.path(), "wiki/schema.md", "hand-edited content").unwrap();
+        ensure_wiki_schema(vault.path()).unwrap();
+        let unchanged = fs_ops::read_to_string(vault.path(), "wiki/schema.md").unwrap();
+        assert_eq!(unchanged, "hand-edited content");
+    }
+
+    #[test]
+    fn regenerate_index_also_writes_wiki_schema_when_missing() {
+        // Every finalization path that regenerates the index must pick up
+        // wiki/schema.md too — this is the one place a pre-existing vault
+        // (created before this file existed) is guaranteed to get it,
+        // with no separate migration step.
+        let vault = tempfile::tempdir().unwrap();
+        assert!(!vault.path().join("wiki/schema.md").exists());
+
+        regenerate_index(vault.path()).unwrap();
+
+        assert!(vault.path().join("wiki/schema.md").is_file());
     }
 
     #[test]
@@ -1701,6 +1775,10 @@ mod tests {
                 .any(|p| p.ends_with("wiki/concepts/widget.md"))
         );
         assert!(vault.path().join("wiki/index.md").is_file());
+        assert!(vault.path().join("wiki/schema.md").is_file());
+
+        let log = fs_ops::read_to_string(vault.path(), "wiki/log.md").unwrap();
+        assert!(log.contains("[compile] ok: 1 source(s) processed, 0 failed"));
 
         let saved_manifest = manifest::store::load(vault.path()).unwrap();
         assert!(saved_manifest.is_compiled_at_current_hash("https://example.com/widget"));

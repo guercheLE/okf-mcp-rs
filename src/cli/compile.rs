@@ -141,8 +141,35 @@ pub(crate) async fn report_and_commit(
             "{} source(s) failed / lint found errors — not committing; fix and re-run compile.",
             report.sources_failed()
         ));
+        // Best-effort, same as every other `wiki_log::append` call site —
+        // this human-readable summary must never itself turn a real
+        // failure into a *different* error (or mask the original one).
+        let _ = okf_mcp::storage::wiki_log::append(
+            vault_root,
+            "report_and_commit",
+            "error",
+            &format!(
+                "{} source(s) failed, lint errors: {}",
+                report.sources_failed(),
+                lint_report.has_errors()
+            ),
+        );
         anyhow::bail!("compile finished with errors");
     }
+
+    // Logged before the bundle/commit below so `wiki/log.md`'s own write
+    // lands on disk in time to be included in `paths` and committed
+    // alongside everything else this run touched.
+    let _ = okf_mcp::storage::wiki_log::append(
+        vault_root,
+        "report_and_commit",
+        "ok",
+        &format!(
+            "{} source(s) compiled, {} path(s) fixed",
+            report.sources_processed(),
+            fixed_paths.len()
+        ),
+    );
 
     let bundle_path = bundle::write_bundle(vault_root)?;
     let mut paths: Vec<String> = report
@@ -156,6 +183,16 @@ pub(crate) async fn report_and_commit(
         .collect();
     paths.extend(fixed_paths);
     paths.push("wiki/index.md".to_string());
+    paths.push("wiki/schema.md".to_string());
+    // `wiki/log.md` is written best-effort above (`let _ = ...append(...)`)
+    // and must stay optional here too: only stage it when it actually
+    // exists, so a run where the append silently failed (or the file is
+    // gitignored) still commits everything else instead of `git commit`
+    // bailing on a missing pathspec and this whole successful run going
+    // uncommitted.
+    if okf_mcp::storage::fs_ops::exists(vault_root, "wiki/log.md") {
+        paths.push("wiki/log.md".to_string());
+    }
     if let Ok(relative) = bundle_path.strip_prefix(vault_root) {
         paths.push(relative.to_string_lossy().replace('\\', "/"));
     }
@@ -269,6 +306,11 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!vault.path().join("okf.json").exists());
+
+        // Even a failed run is logged — with an "error" status — not just
+        // silently dropped.
+        let log_md = std::fs::read_to_string(vault.path().join("wiki/log.md")).unwrap();
+        assert!(log_md.contains("[report_and_commit] error:"));
     }
 
     #[tokio::test]
@@ -302,9 +344,11 @@ mod tests {
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
         init_repo(vault.path());
         // In the real `compiler::compile` flow, `regenerate_index` writes
-        // this before `report_and_commit` ever runs.
+        // both of these (`wiki/index.md` and, via `ensure_wiki_schema`,
+        // `wiki/schema.md`) before `report_and_commit` ever runs.
         std::fs::create_dir_all(vault.path().join("wiki")).unwrap();
         std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
+        std::fs::write(vault.path().join("wiki/schema.md"), "# Wiki Schema\n").unwrap();
 
         let result = report_and_commit(
             vault.path(),
@@ -321,6 +365,21 @@ mod tests {
         assert!(vault.path().join("okf.json").exists());
         let log = run_git(vault.path(), &["log", "--oneline"]);
         assert!(!String::from_utf8_lossy(&log.stdout).trim().is_empty());
+
+        // wiki/log.md must exist AND be part of the same commit — not just
+        // written to disk and forgotten (the whole point of adding it to
+        // `paths` explicitly, since `report_and_commit` builds that list by
+        // hand rather than `git add -A`).
+        let log_md = std::fs::read_to_string(vault.path().join("wiki/log.md")).unwrap();
+        assert!(log_md.contains("[report_and_commit] ok:"));
+        let show = run_git(vault.path(), &["show", "--stat", "--format=", "HEAD"]);
+        let show_text = String::from_utf8_lossy(&show.stdout);
+        assert!(show_text.contains("wiki/log.md"));
+        // wiki/schema.md is the other file `ensure_wiki_schema` creates
+        // outside of `run_compile_sources`'s `touched_paths` tracking — it
+        // must be staged and committed by the same hand-built `paths` list,
+        // not silently left untracked forever.
+        assert!(show_text.contains("wiki/schema.md"));
     }
 
     #[tokio::test]
@@ -330,6 +389,7 @@ mod tests {
         init_repo(vault.path());
         std::fs::create_dir_all(vault.path().join("wiki")).unwrap();
         std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
+        std::fs::write(vault.path().join("wiki/schema.md"), "# Wiki Schema\n").unwrap();
 
         let result = report_and_commit(
             vault.path(),
@@ -362,6 +422,7 @@ mod tests {
         let original = "---\nokf_version: \"0.2\"\ntype: concept\nid: concept_a\ntitle: \"a\"\nsources:\n  - resource: \"/raw/raw_aaa\"\n---\n\n# a\n";
         std::fs::write(vault.path().join("wiki/concepts/a.md"), original).unwrap();
         std::fs::write(vault.path().join("wiki/index.md"), "# Wiki Index\n").unwrap();
+        std::fs::write(vault.path().join("wiki/schema.md"), "# Wiki Schema\n").unwrap();
         init_repo(vault.path());
 
         let result = report_and_commit(

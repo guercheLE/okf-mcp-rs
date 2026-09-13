@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::core::output::{Output, ProgressEvent};
-use crate::storage::fs_ops;
+use crate::storage::{fs_ops, wiki_log};
 use crate::validator::LintReport;
 use crate::validator::frontmatter::parse_wiki_page;
 use crate::validator::lint_bundle;
@@ -206,6 +206,34 @@ pub async fn fix_broken_links(
         }
     }
 
+    // Best-effort, same as every other `wiki_log::append` call site: pages
+    // (or a "skipped"/"failed" outcome) already landed either way, so a
+    // failure to append this summary must never turn an otherwise-real run
+    // into an error. Skipped entirely when there was nothing to do — both
+    // current call sites only reach this function when the lint report
+    // already has at least one broken link, so `report.outcomes` is never
+    // actually empty in practice, but a hypothetical future direct call
+    // with nothing to fix shouldn't log a vacuous entry.
+    if !report.outcomes.is_empty() {
+        let synthesized = report.synthesized_slugs().len();
+        let skipped = report
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o.status, LinkFixStatus::SkippedNoSourceContext))
+            .count();
+        let failed = report
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o.status, LinkFixStatus::Failed(_)))
+            .count();
+        let _ = wiki_log::append(
+            vault_root,
+            "fix_broken_links",
+            if failed == 0 { "ok" } else { "error" },
+            &format!("{synthesized} synthesized, {skipped} skipped, {failed} failed"),
+        );
+    }
+
     Ok(report)
 }
 
@@ -325,6 +353,11 @@ mod tests {
             LinkFixStatus::SkippedNoSourceContext
         ));
         assert!(report.touched_paths.is_empty());
+
+        // A skip is neither a synthesis nor an error — still logged, with
+        // an "ok" status (nothing actually failed).
+        let log = fs_ops::read_to_string(vault.path(), "wiki/log.md").unwrap();
+        assert!(log.contains("[fix_broken_links] ok: 0 synthesized, 1 skipped, 0 failed"));
     }
 
     /// Minimal HTTP/1.1 server returning a fixed response to the first
