@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-09-13
+
+### Added
+- `WikiFrontmatter` now models `status`, `stale_after`, and `generated` — optional, advisory-only fields the compiler prompt already emitted but the struct never captured.
+- Raw blobs are resolved by id (`raw_id_from_resource`/`raw_id_from_filename`/`resolve_raw_path`) rather than by string-matching literal `raw/<id>.md` paths across lint, the explorer, search indexing, the auto-fixer, the compiler, ingest, and the manifest/bundle, and now get human-readable filenames: `raw/<raw_id>--<slug>.md`, slugged from the raw body's H1 (falling back to the local filename stem, the URL's last path segment, then its host). Existing bare-named files continue to resolve unchanged.
+- Four new wiki content directories — `syntheses/`, `comparisons/`, `decisions/`, `questions/` — alongside `concepts/`/`entities/`, wired through the validator, explorer (graph and frontend), search, bundle, and compiler, with prompt routing guidance for the new categories and an orphan-lint exemption for questions/decisions pages.
+- `wiki/schema.md` (vault conventions: content dirs, frontmatter shape, wikilink syntax) and `wiki/log.md` (an append-only compile history written from all four compile-finalization paths) are now scaffolded into every vault.
+- `okf-trace-provenance` MCP tool: walks a wiki page's sources from its frontmatter to its raw evidence, joining the manifest for each source's ACTIVE/SUPERSEDED/TOMBSTONED status, alongside the page's own `status`/`stale_after`/`generated` fields.
+
 ## [0.12.2] - 2026-08-15
 
 ### Fixed

@@ -3008,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "okf-mcp"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
