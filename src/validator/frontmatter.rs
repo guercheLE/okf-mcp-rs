@@ -12,6 +12,15 @@ pub struct SourceRef {
     pub title: Option<String>,
 }
 
+/// Provenance stamp for compiler-written pages, per the compiler prompt's
+/// `generated: { by: "...", at: "<ISO8601>" }` template
+/// (`src/compiler/prompts.rs`) — previously emitted but unmodeled here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Generated {
+    pub by: String,
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiFrontmatter {
     /// Per OKF v0.2 §12, `okf_version` belongs only in the bundle-root
@@ -36,6 +45,18 @@ pub struct WikiFrontmatter {
     pub tags: Vec<String>,
     #[serde(default)]
     pub timestamp: Option<String>,
+    /// Advisory lifecycle marker (e.g. `"draft"`) — the compiler prompt
+    /// instructs the LLM to set this only when a page is genuinely
+    /// uncertain/incomplete; omitted otherwise. Not enforced by `lint`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Advisory expiry date (`YYYY-MM-DD`) — set by the compiler only when
+    /// content has an obvious, concrete expiry. Not enforced by `lint`.
+    #[serde(default)]
+    pub stale_after: Option<String>,
+    /// Provenance stamp recording which process wrote this page and when.
+    #[serde(default)]
+    pub generated: Option<Generated>,
 }
 
 pub struct ParsedPage {
@@ -126,6 +147,42 @@ mod tests {
         assert_eq!(parsed.frontmatter.okf_version, None);
         assert_eq!(parsed.frontmatter.id, None);
         assert_eq!(parsed.frontmatter.r#type, "Person");
+    }
+
+    #[test]
+    fn parses_status_stale_after_and_generated_when_present() {
+        let page = concat!(
+            "---\n",
+            "type: concept\n",
+            "title: \"Draft Concept\"\n",
+            "status: draft\n",
+            "stale_after: \"2026-12-31\"\n",
+            "generated: { by: \"okf-mcp-compiler\", at: \"2026-07-30T18:52:00Z\" }\n",
+            "---\n",
+            "\n",
+            "# Draft Concept\n",
+        );
+        let parsed = parse_wiki_page(page).unwrap();
+        assert_eq!(parsed.frontmatter.status.as_deref(), Some("draft"));
+        assert_eq!(
+            parsed.frontmatter.stale_after.as_deref(),
+            Some("2026-12-31")
+        );
+        assert_eq!(
+            parsed.frontmatter.generated,
+            Some(Generated {
+                by: "okf-mcp-compiler".to_string(),
+                at: "2026-07-30T18:52:00Z".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn status_stale_after_and_generated_default_to_none_when_absent() {
+        let parsed = parse_wiki_page(EXAMPLE).unwrap();
+        assert_eq!(parsed.frontmatter.status, None);
+        assert_eq!(parsed.frontmatter.stale_after, None);
+        assert_eq!(parsed.frontmatter.generated, None);
     }
 
     #[test]
