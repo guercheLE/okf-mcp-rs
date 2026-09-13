@@ -67,6 +67,28 @@ ingested_at: "2026-07-30T18:50:00Z"
 
 Rule: Files in `./raw/` are append-only and never modified by the LLM or pipeline after writing. *(Revisited in Q3 — see the CAS/manifest design below.)*
 
+> **Implementation note (this repo):** the actual on-disk filename is
+> `./raw/<raw_id>--<slug>.md` — e.g. `raw/raw_a1f9448945--microservices-architecture.md`
+> — not the bare `<slug_or_hash>.md`/`raw_<hash>.md` forms shown in this
+> section's examples. `raw_id` (the hash-derived `raw_<first-10-hex-chars>`
+> token) is, and remains, the sole stable identity: it's what
+> `sources[].resource`, the manifest, and `okf.json` all key on. `<slug>` is
+> a purely cosmetic, best-effort suffix — derived once at ingest time from
+> the raw body's own `# H1` if it has one, else the local file's stem, else
+> the source URL's last path segment, else its host, sanitized to a
+> lowercase ASCII kebab-case string — that exists only so a directory
+> listing of `./raw/` is human-scannable; nothing in the pipeline treats it
+> as meaningful. When no candidate sanitizes to anything (an all-unicode
+> title and an unrecognized source, say), the file falls back to the bare
+> `<raw_id>.md` shape with no `--` suffix at all — every consumer resolves
+> a citation by extracting the leading `raw_id` token and looking it up
+> (via the manifest's `raw_path`, falling back to a directory scan), never
+> by string-matching a literal path, so both shapes resolve identically and
+> a slug can never rename a file already ingested (raw blobs, and their
+> filenames, are still write-once). See `src/ingest/frontmatter.rs`
+> (`write_raw_blob`, `resolve_raw_path`, `raw_id_from_resource`/
+> `raw_id_from_filename`) for the concrete implementation.
+
 **2. LLM Compiler Layer (./raw ──> ./wiki)**
 
 Role: Compiles raw documents into atomic, cross-linked concept pages inside `./wiki/`.

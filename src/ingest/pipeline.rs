@@ -1,7 +1,7 @@
 //! Orchestrates a single `okf-mcp ingest <URL|FILE>` / `okf_ingest` call:
 //! fetch or parse -> hash -> manifest CAS update -> conditional write of
-//! `./raw/<raw_id>.md`. Shared by both the CLI command and the MCP tool, so
-//! there's exactly one place this logic lives.
+//! `./raw/<raw_id>--<slug>.md`. Shared by both the CLI command and the MCP
+//! tool, so there's exactly one place this logic lives.
 
 use std::path::{Path, PathBuf};
 
@@ -69,15 +69,20 @@ pub async fn process_ingest(
             )?;
             // `record_ingest` above ran before the raw blob existed, so it
             // couldn't record where it landed — do that now that
-            // `write_raw_blob` has actually returned a path. Built as the
-            // literal `raw/{raw_id}.md` string (matching exactly what
-            // `write_raw_blob` writes in this phase) rather than
+            // `write_raw_blob` has actually returned a path. Built from
+            // just the returned path's file name (which carries the actual
+            // slug `write_raw_blob` chose, or the bare `raw_id.md` shape
+            // when no slug survived sanitization) rather than
             // `path.strip_prefix(vault_root)`: `write_raw_blob` resolves
             // its returned path through `sandbox_path`, which canonicalizes
             // the vault root, so on a host where the vault lives under a
             // symlink (e.g. macOS's `/var` -> `/private/var`) that
             // strip_prefix could silently fail and store an absolute path.
-            manifest.record_raw_path(&source_uri, raw_id, format!("raw/{raw_id}.md"));
+            let raw_path_str = path
+                .file_name()
+                .map(|name| format!("raw/{}", name.to_string_lossy()))
+                .unwrap_or_else(|| format!("raw/{raw_id}.md"));
+            manifest.record_raw_path(&source_uri, raw_id, raw_path_str);
             Some(path)
         }
     };
@@ -213,6 +218,37 @@ mod tests {
 
         let manifest = manifest::store::load(vault.path()).unwrap();
         assert!(manifest.get_active_raw_id(&report.source_uri).is_some());
+    }
+
+    #[tokio::test]
+    async fn ingesting_records_the_slugged_raw_path_in_the_manifest_for_o1_resolution() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        let source = vault.path().join("source.md");
+        std::fs::write(&source, "# My Cool Title\n\nBody.").unwrap();
+
+        let report = process_ingest(
+            source.to_str().unwrap(),
+            &[],
+            vault.path(),
+            &config(),
+            &mut auth_manager(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let raw_path = report.raw_path.unwrap();
+        let file_name = raw_path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            file_name.ends_with("--my-cool-title.md"),
+            "unexpected file name: {file_name}"
+        );
+
+        let manifest = manifest::store::load(vault.path()).unwrap();
+        let raw_id = manifest.get_active_raw_id(&report.source_uri).unwrap();
+        let recorded = manifest.raw_path_for(raw_id).unwrap();
+        assert_eq!(recorded, format!("raw/{file_name}"));
     }
 
     #[tokio::test]
