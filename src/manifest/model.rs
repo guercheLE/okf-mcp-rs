@@ -221,6 +221,24 @@ impl Manifest {
         })
     }
 
+    /// Finds the manifest's version record for `raw_id`, searched across
+    /// every source's entire history (not just active entries) — mirrors
+    /// `raw_path_for`'s search, but returns the full `SourceStatus` (and the
+    /// owning source's URI) rather than just the recorded path. Backs
+    /// `okf-trace-provenance`'s manifest-status join: a raw blob's own
+    /// frontmatter has no way of knowing it was later superseded or
+    /// tombstoned, only the manifest does. `None` when `raw_id` isn't
+    /// tracked by this manifest at all (e.g. a raw file dropped in by hand).
+    pub fn find_version(&self, raw_id: &str) -> Option<(&str, &SourceVersion)> {
+        self.sources.iter().find_map(|(uri, entry)| {
+            entry
+                .history
+                .iter()
+                .find(|version| version.raw_id == raw_id)
+                .map(|version| (uri.as_str(), version))
+        })
+    }
+
     /// Every `(uri, active SourceVersion)` pair — the set `compile`/`reindex`
     /// should actually read, per the design's "source of truth = ACTIVE
     /// manifest entries only" rule.
@@ -408,6 +426,38 @@ mod tests {
         assert_eq!(manifest.raw_path_for("raw_aaa"), Some("raw/raw_aaa.md"));
         assert_eq!(manifest.raw_path_for("raw_bbb"), None);
         assert_eq!(manifest.raw_path_for("raw_nonexistent"), None);
+    }
+
+    #[test]
+    fn find_version_returns_the_uri_and_status_for_an_active_raw_id() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+
+        let (uri, version) = manifest.find_version("raw_aaa").unwrap();
+        assert_eq!(uri, "uri");
+        assert_eq!(version.status, SourceStatus::Active);
+    }
+
+    #[test]
+    fn find_version_finds_a_superseded_or_tombstoned_raw_id_too() {
+        let mut manifest = Manifest::default();
+        manifest.record_ingest("uri", "sha256:aaa", "raw_aaa", "t0");
+        manifest.record_ingest("uri", "sha256:bbb", "raw_bbb", "t1");
+
+        let (uri, version) = manifest.find_version("raw_aaa").unwrap();
+        assert_eq!(uri, "uri");
+        assert_eq!(
+            version.status,
+            SourceStatus::Superseded {
+                by_raw_id: "raw_bbb".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn find_version_is_none_for_an_untracked_raw_id() {
+        let manifest = Manifest::default();
+        assert!(manifest.find_version("raw_nonexistent").is_none());
     }
 
     #[test]

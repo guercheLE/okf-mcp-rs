@@ -1,7 +1,7 @@
-//! The `okf-mcp` MCP tool surface: 13 fixed, well-defined tools (ingest,
-//! compile, rebuild, synthesize-next, synthesize-submit, lint, reindex,
-//! search, delete, read-index, read-concept, list-vaults, explore) over a
-//! Git-native OKF knowledge vault.
+//! The `okf-mcp` MCP tool surface: a fixed, well-defined set of tools
+//! (ingest, compile, rebuild, synthesize-next, synthesize-submit, lint,
+//! reindex, search, delete, read-index, read-concept, trace-provenance,
+//! list-vaults, explore) over a Git-native OKF knowledge vault.
 //!
 //! Deliberately not framed as a discovery layer over an unknown API
 //! surface (contrast the old mcpify-generated `search`/`get`/`call` trio
@@ -49,11 +49,12 @@ use crate::core::output::Output;
 use crate::core::vault_registry::VaultRegistry;
 use crate::core::vault_resolver::{resolve_vault, sandbox_path, wiki_content_dirs};
 use crate::http::auth_extractor::extract_request_credentials;
+use crate::ingest::frontmatter::{parse_raw_frontmatter, raw_id_from_resource, resolve_raw_path};
 use crate::ingest::{self, DeleteOutcome};
 use crate::manifest;
 use crate::search;
 use crate::storage::fs_ops;
-use crate::validator::frontmatter::parse_wiki_page;
+use crate::validator::frontmatter::{SourceRef, parse_wiki_page};
 use crate::validator::rules::markdown_files_in;
 use crate::validator::{self, report as lint_report_format};
 
@@ -225,6 +226,15 @@ pub struct ReadConceptArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TraceProvenanceArgs {
+    /// Same resolution as `okf-read-concept`'s `id_or_path`: a wiki page's
+    /// slug, a legacy `id:` frontmatter value, or a vault-relative wiki path
+    pub id_or_path: String,
+    #[serde(default)]
+    pub vault: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListVaultsArgs {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -307,6 +317,66 @@ fn find_concept_path(vault_root: &Path, id_or_path: &str) -> anyhow::Result<Path
     }
 
     anyhow::bail!("no wiki concept found for '{id_or_path}'")
+}
+
+/// Traces one `sources:` entry back to its raw blob and current manifest
+/// status, for `okf-trace-provenance`. Never propagates an error: a
+/// malformed `resource` value, a `raw_id` whose file can't be found, or a
+/// raw file whose own frontmatter fails to parse all report as
+/// `"UNRESOLVABLE"` (with a `reason`) rather than failing the whole call —
+/// one bad citation on a page shouldn't hide every other source's
+/// provenance. A raw file that resolves fine but was never (or is no
+/// longer) tracked in this vault's manifest — e.g. dropped in by hand —
+/// reports `"UNTRACKED"` rather than a false `"ACTIVE"`.
+fn trace_source(
+    vault_root: &Path,
+    manifest: &manifest::Manifest,
+    source: &SourceRef,
+) -> serde_json::Value {
+    let unresolvable = |raw_id: Option<&str>, reason: &str| {
+        serde_json::json!({
+            "resource": source.resource,
+            "raw_id": raw_id,
+            "source_url": null,
+            "checksum": null,
+            "ingested_at": null,
+            "manifest_status": { "status": "UNRESOLVABLE", "reason": reason },
+        })
+    };
+
+    let Some(raw_id) = raw_id_from_resource(&source.resource) else {
+        return unresolvable(None, "could not extract a raw_id from this resource value");
+    };
+
+    let raw_path = match resolve_raw_path(vault_root, &raw_id) {
+        Ok(path) => path,
+        Err(_) => return unresolvable(Some(&raw_id), "no raw file found for this raw_id"),
+    };
+
+    let raw_frontmatter = match std::fs::read_to_string(&raw_path)
+        .map_err(anyhow::Error::from)
+        .and_then(|content| parse_raw_frontmatter(&content))
+    {
+        Ok(frontmatter) => frontmatter,
+        Err(_) => {
+            return unresolvable(Some(&raw_id), "raw file's frontmatter could not be parsed");
+        }
+    };
+
+    let manifest_status = match manifest.find_version(&raw_id) {
+        Some((_uri, version)) => serde_json::to_value(&version.status)
+            .unwrap_or_else(|_| serde_json::json!({ "status": "UNTRACKED" })),
+        None => serde_json::json!({ "status": "UNTRACKED" }),
+    };
+
+    serde_json::json!({
+        "resource": source.resource,
+        "raw_id": raw_id,
+        "source_url": raw_frontmatter.source_url,
+        "checksum": raw_frontmatter.checksum,
+        "ingested_at": raw_frontmatter.ingested_at,
+        "manifest_status": manifest_status,
+    })
 }
 
 /// Shared state every tool method needs. `Clone` because rmcp constructs
@@ -805,6 +875,48 @@ impl OkfServer {
     }
 
     #[tool(
+        name = "okf-trace-provenance",
+        description = "Trace a compiled wiki page back to its cited raw sources and each source's current manifest status (ACTIVE/SUPERSEDED/TOMBSTONED/UNTRACKED/UNRESOLVABLE) — \"why does the wiki believe this\"."
+    )]
+    async fn trace_provenance(
+        &self,
+        Parameters(args): Parameters<TraceProvenanceArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.run_tool("okf-trace-provenance", async move {
+            let vault_root = resolve_vault(args.vault.as_deref())?;
+            let path = find_concept_path(&vault_root, &args.id_or_path)?;
+            let content = std::fs::read_to_string(&path)?;
+            let parsed = parse_wiki_page(&content)?;
+            let relative = path
+                .strip_prefix(&vault_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let source_manifest = manifest::store::load(&vault_root)?;
+            let sources: Vec<serde_json::Value> = parsed
+                .frontmatter
+                .sources
+                .iter()
+                .map(|source| trace_source(&vault_root, &source_manifest, source))
+                .collect();
+
+            Ok(serde_json::json!({
+                "page": {
+                    "path": relative,
+                    "type": parsed.frontmatter.r#type,
+                    "title": parsed.frontmatter.title,
+                    "status": parsed.frontmatter.status,
+                    "stale_after": parsed.frontmatter.stale_after,
+                    "generated": parsed.frontmatter.generated,
+                },
+                "sources": sources,
+            }))
+        })
+        .await
+    }
+
+    #[tool(
         name = "okf-explore",
         description = "Start (or reuse) a local browser-based explorer for the vault — 3D link graph, note pane with backlinks, hub filtering, and search over the vault's index — and return its URL."
     )]
@@ -1046,10 +1158,11 @@ impl ServerHandler for OkfServer {
             .with_instructions(
                 "A Git-native OKF (Open Knowledge Format) knowledge vault: ingest web pages \
                  (via Firecrawl) or local files, compile them into a linked wiki with an LLM, \
-                 lint the result, and search it. Thirteen fixed tools: okf-ingest, okf-compile, \
+                 lint the result, and search it. Fixed tools: okf-ingest, okf-compile, \
                  okf-rebuild, okf-synthesize-next, okf-synthesize-submit, okf-lint, \
                  okf-reindex, okf-search, okf-delete, okf-read-index, okf-read-concept, \
-                 okf-list-vaults, okf-explore. Prefer okf-synthesize-next/okf-synthesize-submit over \
+                 okf-trace-provenance, okf-list-vaults, okf-explore. Prefer \
+                 okf-synthesize-next/okf-synthesize-submit over \
                  okf-compile/okf-rebuild when you (the calling client) have your own LLM — \
                  they use it directly instead of requiring a separately configured provider."
                     .to_string(),
@@ -1099,6 +1212,58 @@ mod tests {
         let dir = vault_root.join("raw");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{raw_id}.md")), content).unwrap();
+    }
+
+    /// Writes a real raw blob (proper `RawFrontmatter`, via `write_raw_blob`)
+    /// and registers it in `manifest` — `record_ingest` plus the
+    /// `record_raw_path` step `ingest::pipeline::process_ingest` normally
+    /// does right after writing — so `okf-trace-provenance`'s manifest-status
+    /// join has something real to find. Callers still need to
+    /// `manifest::store::save` the manifest themselves once done.
+    fn ingest_raw(
+        vault_root: &Path,
+        manifest: &mut manifest::Manifest,
+        uri: &str,
+        raw_id: &str,
+        content: &str,
+    ) {
+        let hash = format!("sha256:{raw_id}");
+        manifest.record_ingest(uri, &hash, raw_id, "t0");
+        let path = crate::ingest::frontmatter::write_raw_blob(
+            vault_root,
+            raw_id,
+            uri,
+            &[],
+            &hash,
+            "t0",
+            content,
+        )
+        .unwrap();
+        // Built from the file name, not `path.strip_prefix(vault_root)` —
+        // `write_raw_blob` canonicalizes the vault root internally
+        // (`sandbox_path`), which can silently fail to strip on a host
+        // where the vault lives under a symlink (e.g. macOS's `/var` ->
+        // `/private/var`); `ingest::pipeline::process_ingest` uses the same
+        // approach for the same reason.
+        let raw_path = path
+            .file_name()
+            .map(|name| format!("raw/{}", name.to_string_lossy()))
+            .unwrap_or_else(|| format!("raw/{raw_id}.md"));
+        manifest.record_raw_path(uri, raw_id, raw_path);
+    }
+
+    fn write_wiki_page_citing(
+        vault_root: &Path,
+        slug: &str,
+        extra_frontmatter: &str,
+        resource: &str,
+    ) {
+        let dir = vault_root.join("wiki/concepts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = format!(
+            "---\ntype: concept\ntitle: \"{slug}\"\n{extra_frontmatter}sources:\n  - resource: \"{resource}\"\n---\n\n# {slug}\n"
+        );
+        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
     }
 
     #[test]
@@ -1456,6 +1621,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_provenance_reports_an_active_source_and_the_pages_own_lifecycle_fields() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let mut manifest = manifest::Manifest::default();
+        ingest_raw(
+            vault.path(),
+            &mut manifest,
+            "https://example.com/a",
+            "raw_aaa",
+            "# Doc\n\nBody.",
+        );
+        manifest::store::save(vault.path(), &manifest).unwrap();
+
+        write_wiki_page_citing(
+            vault.path(),
+            "widgets",
+            "status: draft\nstale_after: \"2026-12-31\"\ngenerated: { by: \"okf-mcp-compiler\", at: \"t0\" }\n",
+            "/raw/raw_aaa.md",
+        );
+
+        let server = server();
+        let result = server
+            .trace_provenance(Parameters(TraceProvenanceArgs {
+                id_or_path: "widgets".to_string(),
+                vault: Some(vault.path().to_str().unwrap().to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+
+        let body = tool_json(&result);
+        assert_eq!(body["page"]["path"], "wiki/concepts/widgets.md");
+        assert_eq!(body["page"]["status"], "draft");
+        assert_eq!(body["page"]["stale_after"], "2026-12-31");
+        assert_eq!(body["page"]["generated"]["by"], "okf-mcp-compiler");
+
+        let sources = body["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0]["raw_id"], "raw_aaa");
+        assert_eq!(sources[0]["source_url"], "https://example.com/a");
+        assert_eq!(sources[0]["checksum"], "sha256:raw_aaa");
+        assert_eq!(sources[0]["manifest_status"]["status"], "ACTIVE");
+    }
+
+    #[tokio::test]
+    async fn trace_provenance_reports_a_superseded_sources_replacement() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let mut manifest = manifest::Manifest::default();
+        ingest_raw(
+            vault.path(),
+            &mut manifest,
+            "uri",
+            "raw_aaa",
+            "# Old\n\nBody.",
+        );
+        ingest_raw(
+            vault.path(),
+            &mut manifest,
+            "uri",
+            "raw_bbb",
+            "# New\n\nBody.",
+        );
+        manifest::store::save(vault.path(), &manifest).unwrap();
+
+        // Cites the now-superseded version on purpose — this is exactly the
+        // case a bare raw blob's own frontmatter can't tell you about.
+        write_wiki_page_citing(vault.path(), "stale-fact", "", "/raw/raw_aaa.md");
+
+        let server = server();
+        let result = server
+            .trace_provenance(Parameters(TraceProvenanceArgs {
+                id_or_path: "stale-fact".to_string(),
+                vault: Some(vault.path().to_str().unwrap().to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+
+        let body = tool_json(&result);
+        let sources = body["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["manifest_status"]["status"], "SUPERSEDED");
+        assert_eq!(sources[0]["manifest_status"]["by_raw_id"], "raw_bbb");
+    }
+
+    #[tokio::test]
+    async fn trace_provenance_reports_tombstoned_and_the_reason() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let mut manifest = manifest::Manifest::default();
+        ingest_raw(
+            vault.path(),
+            &mut manifest,
+            "uri",
+            "raw_aaa",
+            "# Old\n\nBody.",
+        );
+        manifest.tombstone("uri", "deprecated", "t1").unwrap();
+        manifest::store::save(vault.path(), &manifest).unwrap();
+
+        write_wiki_page_citing(vault.path(), "gone", "", "/raw/raw_aaa.md");
+
+        let server = server();
+        let result = server
+            .trace_provenance(Parameters(TraceProvenanceArgs {
+                id_or_path: "gone".to_string(),
+                vault: Some(vault.path().to_str().unwrap().to_string()),
+            }))
+            .await
+            .unwrap();
+        let body = tool_json(&result);
+        let sources = body["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["manifest_status"]["status"], "TOMBSTONED");
+        assert_eq!(sources[0]["manifest_status"]["reason"], "deprecated");
+    }
+
+    #[tokio::test]
+    async fn trace_provenance_reports_untracked_for_a_raw_file_never_ingested_via_the_manifest() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        // A raw blob written directly, never recorded in the manifest (e.g.
+        // dropped in by hand) — must not be misreported as ACTIVE.
+        crate::ingest::frontmatter::write_raw_blob(
+            vault.path(),
+            "raw_aaa",
+            "https://example.com/a",
+            &[],
+            "sha256:aaa",
+            "t0",
+            "# Doc\n\nBody.",
+        )
+        .unwrap();
+        write_wiki_page_citing(vault.path(), "untracked", "", "/raw/raw_aaa.md");
+
+        let server = server();
+        let result = server
+            .trace_provenance(Parameters(TraceProvenanceArgs {
+                id_or_path: "untracked".to_string(),
+                vault: Some(vault.path().to_str().unwrap().to_string()),
+            }))
+            .await
+            .unwrap();
+        let body = tool_json(&result);
+        let sources = body["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["manifest_status"]["status"], "UNTRACKED");
+    }
+
+    #[tokio::test]
+    async fn trace_provenance_reports_unresolvable_for_a_source_with_no_matching_raw_file() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+        write_wiki_page_citing(vault.path(), "dangling", "", "/raw/raw_missing.md");
+
+        let server = server();
+        let result = server
+            .trace_provenance(Parameters(TraceProvenanceArgs {
+                id_or_path: "dangling".to_string(),
+                vault: Some(vault.path().to_str().unwrap().to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+
+        let body = tool_json(&result);
+        let sources = body["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["raw_id"], "raw_missing");
+        assert_eq!(sources[0]["manifest_status"]["status"], "UNRESOLVABLE");
+    }
+
+    #[tokio::test]
+    async fn trace_provenance_errors_clearly_for_an_unknown_page() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let server = server();
+        let result = server
+            .trace_provenance(Parameters(TraceProvenanceArgs {
+                id_or_path: "does-not-exist".to_string(),
+                vault: Some(vault.path().to_str().unwrap().to_string()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
     async fn delete_of_a_never_ingested_source_is_a_tool_error_not_a_panic() {
         let vault = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
@@ -1520,6 +1875,7 @@ mod tests {
                 "okf-search",
                 "okf-synthesize-next",
                 "okf-synthesize-submit",
+                "okf-trace-provenance",
             ]
         );
 

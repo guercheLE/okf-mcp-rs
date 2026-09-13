@@ -24,6 +24,24 @@ pub struct RawFrontmatter {
     pub tags: Vec<String>,
 }
 
+/// Parses a raw blob's own `---\n<yaml>\n---\n` frontmatter (the shape
+/// `write_raw_blob` writes) back into a `RawFrontmatter` — the read-side
+/// counterpart, used by `okf-trace-provenance` to recover a cited source's
+/// `source_url`/`checksum`/`ingested_at` without re-deriving them. Errors
+/// (rather than panicking) on missing delimiters or malformed YAML, since
+/// `okf-trace-provenance` treats a source it can't fully read as
+/// "unresolvable" instead of failing the whole call.
+pub fn parse_raw_frontmatter(content: &str) -> anyhow::Result<RawFrontmatter> {
+    let after_open = content
+        .strip_prefix("---\n")
+        .ok_or_else(|| anyhow::anyhow!("missing opening '---' frontmatter delimiter"))?;
+    let close_at = after_open
+        .find("\n---\n")
+        .ok_or_else(|| anyhow::anyhow!("missing closing '---' frontmatter delimiter"))?;
+    let yaml = &after_open[..close_at];
+    serde_yaml::from_str(yaml).map_err(|err| anyhow::anyhow!("invalid frontmatter YAML: {err}"))
+}
+
 /// `sha256:<hex>`, matching the checksum format used throughout the
 /// manifest and frontmatter. `sha2` 0.11's digest output type doesn't
 /// implement `LowerHex` the way 0.10's did, so hex-encode manually — same
@@ -330,6 +348,44 @@ mod tests {
         assert!(contents.contains("tags:"));
         assert!(contents.contains("- architecture"));
         assert!(contents.ends_with("# Hello\n\nBody text."));
+    }
+
+    #[test]
+    fn parse_raw_frontmatter_round_trips_what_write_raw_blob_writes() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
+
+        let path = write_raw_blob(
+            vault.path(),
+            "raw_aaa",
+            "https://example.com/docs",
+            &["architecture".to_string()],
+            "sha256:aaa",
+            "2026-07-30T18:50:00Z",
+            "# Hello\n\nBody text.",
+        )
+        .unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let frontmatter = parse_raw_frontmatter(&contents).unwrap();
+        assert_eq!(frontmatter.id, "raw_aaa");
+        assert_eq!(
+            frontmatter.source_url.as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert_eq!(frontmatter.checksum, "sha256:aaa");
+        assert_eq!(frontmatter.ingested_at, "2026-07-30T18:50:00Z");
+    }
+
+    #[test]
+    fn parse_raw_frontmatter_errors_on_missing_delimiters() {
+        assert!(parse_raw_frontmatter("no frontmatter here").is_err());
+        assert!(parse_raw_frontmatter("---\nid: raw_aaa\n").is_err());
+    }
+
+    #[test]
+    fn parse_raw_frontmatter_errors_on_malformed_yaml() {
+        assert!(parse_raw_frontmatter("---\n[not: valid: yaml:\n---\nbody").is_err());
     }
 
     #[test]
