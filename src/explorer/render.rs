@@ -1,8 +1,9 @@
 //! Renders one vault file for the explorer's note pane: markdown → HTML
 //! (`pulldown-cmark`), with `[[wikilinks]]` rewritten to in-app anchors the
 //! frontend can intercept, plus the page's *complete* frontmatter as JSON
-//! (a generic YAML parse — so fields `WikiFrontmatter` doesn't model, like
-//! `generated`/`status`/`stale_after`, still show up in the properties
+//! (a generic, lenient YAML parse — so any field beyond what
+//! `WikiFrontmatter` models, or a page whose frontmatter doesn't parse
+//! under the stricter validator at all, still shows up in the properties
 //! table) and its backlinks/outlinks from the graph.
 
 use std::collections::HashSet;
