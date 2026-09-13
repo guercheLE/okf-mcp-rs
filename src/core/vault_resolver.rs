@@ -11,21 +11,38 @@ use super::vault_registry::VaultRegistry;
 
 const VAULT_MARKER_DIR: &str = ".okf";
 
-/// The two sibling content directories that make up the published OKF
-/// bundle: `wiki/concepts/` for abstract ideas/processes/patterns, and
-/// `wiki/entities/` for concrete subjects (people, organizations, places,
-/// tools) — mirroring the convention used by comparable OKF-wiki
-/// implementations (e.g. `github.com/mchu1966/okf-wiki`). Neither the
-/// spec's own `type:` vocabulary nor its directory layout is centrally
-/// mandated, but every module that reads "the wiki" (lint, search indexing,
-/// `okf-read-concept`, the bundle summary, index generation, pending-source
-/// detection) must agree on the same two directories or content that lands
-/// in one gets silently invisible to logic still only looking at the other.
-pub fn wiki_content_dirs(vault_root: &Path) -> [PathBuf; 2] {
+/// The sibling content directories that make up the published OKF bundle,
+/// each paired with the graph/lint "kind" its pages are tagged with:
+/// `wiki/concepts/` (`concept`, abstract ideas/processes/patterns) and
+/// `wiki/entities/` (`entity`, concrete subjects: people, organizations,
+/// places, tools) — mirroring the convention used by comparable OKF-wiki
+/// implementations (e.g. `github.com/mchu1966/okf-wiki`) — plus four
+/// optional, lazily-created content types the compiler may route into:
+/// `wiki/syntheses/` (`synthesis`, cross-cutting understanding connecting
+/// multiple existing concepts/entities), `wiki/comparisons/` (`comparison`,
+/// explicit A-vs-B analysis), `wiki/decisions/` (`decision`, a durable
+/// decision extracted from evidence), and `wiki/questions/` (`question`, an
+/// open/unresolved question). Neither the spec's own `type:` vocabulary nor
+/// its directory layout is centrally mandated, but every module that reads
+/// "the wiki" (lint, search indexing, `okf-read-concept`, the bundle
+/// summary, index generation, pending-source detection) must agree on the
+/// same directory list or content that lands in one gets silently invisible
+/// to logic still only looking at another.
+///
+/// Returned as a `Vec` (rather than a fixed-size array) so this list can
+/// grow without changing every consumer's signature again.
+pub fn wiki_content_dirs(vault_root: &Path) -> Vec<(PathBuf, &'static str)> {
     [
-        vault_root.join("wiki/concepts"),
-        vault_root.join("wiki/entities"),
+        ("wiki/concepts", "concept"),
+        ("wiki/entities", "entity"),
+        ("wiki/syntheses", "synthesis"),
+        ("wiki/comparisons", "comparison"),
+        ("wiki/decisions", "decision"),
+        ("wiki/questions", "question"),
     ]
+    .into_iter()
+    .map(|(dir, kind)| (vault_root.join(dir), kind))
+    .collect()
 }
 
 pub fn resolve_vault(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
@@ -193,12 +210,19 @@ mod tests {
     }
 
     #[test]
-    fn wiki_content_dirs_returns_the_concepts_and_entities_siblings() {
+    fn wiki_content_dirs_returns_all_six_content_dirs_paired_with_their_kind() {
         let root = Path::new("/vault");
         let dirs = wiki_content_dirs(root);
         assert_eq!(
             dirs,
-            [root.join("wiki/concepts"), root.join("wiki/entities")]
+            vec![
+                (root.join("wiki/concepts"), "concept"),
+                (root.join("wiki/entities"), "entity"),
+                (root.join("wiki/syntheses"), "synthesis"),
+                (root.join("wiki/comparisons"), "comparison"),
+                (root.join("wiki/decisions"), "decision"),
+                (root.join("wiki/questions"), "question"),
+            ]
         );
     }
 

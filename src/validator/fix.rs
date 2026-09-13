@@ -53,7 +53,7 @@ fn fix_id_field_typos(vault_root: &Path) -> anyhow::Result<Vec<String>> {
     let mut fixed_pages = Vec::new();
 
     let mut content_paths = Vec::new();
-    for dir in wiki_content_dirs(vault_root) {
+    for (dir, _kind) in wiki_content_dirs(vault_root) {
         content_paths.extend(markdown_files_in(&dir)?);
     }
 

@@ -286,7 +286,7 @@ fn find_concept_path(vault_root: &Path, id_or_path: &str) -> anyhow::Result<Path
     }
 
     let mut content_paths = Vec::new();
-    for dir in wiki_content_dirs(vault_root) {
+    for (dir, _kind) in wiki_content_dirs(vault_root) {
         content_paths.extend(markdown_files_in(&dir)?);
     }
 
@@ -1162,7 +1162,7 @@ mod tests {
             next_body["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("Entities vs. Concepts")
+                .contains("Content Routing")
         );
         let jobs = next_body["jobs"].as_array().unwrap();
         assert_eq!(jobs.len(), 1);

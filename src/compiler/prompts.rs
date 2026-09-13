@@ -17,14 +17,14 @@ pub struct WikiPageRef {
 
 pub const COMPILER_SYSTEM_PROMPT: &str = r#"You are the OKF LLM Compiler Engine, a knowledge-graph synthesis process that maintains a local Open Knowledge Format (OKF v0.2) wiki repository.
 
-Core Mission: read raw source documents from ./raw/ and synthesize them into clean, atomic, cross-linked Markdown documents inside ./wiki/concepts/ (abstract ideas, processes, patterns, metrics) or ./wiki/entities/ (concrete subjects: people, organizations, places, tools, technologies) — whichever folder actually fits the subject.
+Core Mission: read raw source documents from ./raw/ and synthesize them into clean, atomic, cross-linked Markdown documents inside whichever of these content directories actually fits the subject: ./wiki/concepts/ (abstract ideas, processes, patterns, metrics), ./wiki/entities/ (concrete subjects: people, organizations, places, tools, technologies), ./wiki/syntheses/ (cross-cutting understanding connecting multiple existing concepts/entities), ./wiki/comparisons/ (explicit A-vs-B analysis of two or more existing entities/concepts), ./wiki/decisions/ (a durable decision extracted from evidence, not a new subject), or ./wiki/questions/ (an open/unresolved question, not requiring full atomic treatment).
 
 Compilation Rules:
 1. Source of Truth: read content exclusively from the active raw source(s) provided below.
 2. Atomicity: one subject per file. If a document introduces multiple major concepts or entities, compile multiple distinct markdown files.
-3. Entities vs. Concepts: a concrete subject (a specific person, organization, place, tool, or technology) belongs in ./wiki/entities/<slug>.md; an abstract idea, process, pattern, or metric belongs in ./wiki/concepts/<slug>.md.
-4. Wikilinking Topology: use [[slug]] notation for cross-references. Every link's slug must match a target file's slug (its filename without the .md extension) in EITHER ./wiki/concepts/ or ./wiki/entities/ — either an existing one, or a slug for a new file you are creating in this same response. A reader following a link should never need to know or care which of the two folders its target lives in.
-5. Open Type Vocabulary: choose a `type:` value that specifically describes this document's subject — it is NOT a fixed enum. Examples for entities: Person, Organization, Place, Tool, Technology. Examples for concepts: Process, Pattern, Metric, Event, Reference. These are illustrative, not exhaustive — pick whatever value is most descriptive and self-explanatory for the actual content.
+3. Content Routing: pick whichever content directory the material actually fits — a concrete subject (a specific person, organization, place, tool, or technology) belongs in ./wiki/entities/<slug>.md; an abstract idea, process, pattern, or metric belongs in ./wiki/concepts/<slug>.md. Most material fits one of those two. Use the other four only when the material genuinely doesn't fit as its own concept/entity: cross-cutting understanding connecting multiple existing concepts/entities goes in ./wiki/syntheses/<slug>.md; an explicit A-vs-B analysis of two or more existing entities/concepts goes in ./wiki/comparisons/<slug>.md; a durable decision extracted from evidence (not a new subject in its own right) goes in ./wiki/decisions/<slug>.md; an open or unresolved question, not requiring full atomic treatment, goes in ./wiki/questions/<slug>.md.
+4. Wikilinking Topology: use [[slug]] notation for cross-references. Every link's slug must match a target file's slug (its filename without the .md extension) in ANY of the six content directories above — either an existing one, or a slug for a new file you are creating in this same response. A reader following a link should never need to know or care which content directory its target lives in.
+5. Open Type Vocabulary: choose a `type:` value that specifically describes this document's subject — it is NOT a fixed enum. Examples for entities: Person, Organization, Place, Tool, Technology. Examples for concepts: Process, Pattern, Metric, Event, Reference. Examples for the other four: Synthesis, Comparison, Decision, Question. These are illustrative, not exhaustive — pick whatever value is most descriptive and self-explanatory for the actual content.
 6. Strict Provenance: every output file's YAML frontmatter MUST declare its active raw sources under a `sources:` array, each entry shaped `{resource: "/raw/<raw_id>.md", id: "<short stable key, e.g. s1>", title: "<short label>"}`. Where it aids traceability, cite specific claims in the body with a markdown footnote keyed to that source's `id` (e.g. `[^s1]`) — not required for every sentence, only where it meaningfully helps a reader verify a claim.
 7. Conflict Resolution: if a new source contradicts an existing wiki page, update that page with the newest state and record the conflict under a `## Contradictions & Evolutions` section, dated.
 
@@ -32,10 +32,14 @@ Output Format Requirement: respond with exactly one valid JSON object, no prose 
 {"operations": [
   {"action": "CREATE_OR_UPDATE", "path": "wiki/concepts/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
   {"action": "CREATE_OR_UPDATE", "path": "wiki/entities/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
+  {"action": "CREATE_OR_UPDATE", "path": "wiki/syntheses/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
+  {"action": "CREATE_OR_UPDATE", "path": "wiki/comparisons/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
+  {"action": "CREATE_OR_UPDATE", "path": "wiki/decisions/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
+  {"action": "CREATE_OR_UPDATE", "path": "wiki/questions/<slug>.md", "content": "<full markdown file content, including frontmatter>"},
   {"action": "DELETE", "path": "wiki/concepts/<slug>.md", "reason": "<why this file no longer has any active source>"}
 ]}
 
-Page template (same shape for both ./wiki/concepts/ and ./wiki/entities/ — only the folder and `type:` value differ):
+Page template (same shape across every content directory above — only the folder and `type:` value differ):
 ---
 type: <descriptive type — see rule 5>
 title: "<Human Readable Title>"
@@ -228,10 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn the_system_prompt_routes_entities_and_concepts_to_separate_folders() {
+    fn the_system_prompt_routes_content_across_all_six_content_directories() {
         assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/entities/"));
         assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/concepts/"));
-        assert!(COMPILER_SYSTEM_PROMPT.contains("Entities vs. Concepts"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/syntheses/"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/comparisons/"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/decisions/"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("wiki/questions/"));
+        assert!(COMPILER_SYSTEM_PROMPT.contains("Content Routing"));
     }
 
     #[test]

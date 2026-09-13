@@ -9,12 +9,14 @@
     --bg: #ffffff; --bg2: #f4f4f5; --bg3: #e9e9ec; --fg: #1f2328; --fg2: #57606a; --line: #d9d9de;
     --accent: #7c5cff; --link: #5b47d6; --sel: #ffd166;
     --c-concept: #6b6b6b; --c-entity: #3d8bfd; --c-tag: #2fb344; --c-raw: #f28c28; --c-cross: #b05cd6; --c-missing: #c9c9c9;
+    --c-synthesis: #12897f; --c-comparison: #d6336c; --c-decision: #a8710a; --c-question: #1f7a99;
     --graph-bg: #fbfbfc; --shadow: 0 6px 24px rgba(0,0,0,.12);
   }
   [data-theme="dark"] {
     --bg: #1e1e22; --bg2: #26262b; --bg3: #303036; --fg: #e6e6e9; --fg2: #a1a1aa; --line: #3a3a42;
     --accent: #a48cff; --link: #b8a6ff; --sel: #ffd166;
     --c-concept: #a9a9ad; --c-entity: #5da3ff; --c-tag: #3ec95a; --c-raw: #ffa04d; --c-cross: #cd7dff; --c-missing: #55555c;
+    --c-synthesis: #3ddcc9; --c-comparison: #ff6fa0; --c-decision: #e8b64c; --c-question: #63d6f0;
     --graph-bg: #141417; --shadow: 0 6px 24px rgba(0,0,0,.45);
   }
   * { box-sizing: border-box; }
@@ -40,6 +42,7 @@
   .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--bg3); font-size: 11.5px; margin: 1px 3px 1px 0; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
   .k-concept { background: var(--c-concept);} .k-entity { background: var(--c-entity);} .k-tag { background: var(--c-tag);} .k-raw { background: var(--c-raw);} .k-cross_vault { background: var(--c-cross);} .k-missing { background: var(--c-missing);}
+  .k-synthesis { background: var(--c-synthesis);} .k-comparison { background: var(--c-comparison);} .k-decision { background: var(--c-decision);} .k-question { background: var(--c-question);}
   #app { --left: 280px; --right: 420px; display: grid; grid-template-columns: var(--left) 1fr var(--right); grid-template-rows: 44px 1fr; height: 100%; }
   #app.no-left { --left: 0px; } #app.no-right { --right: 0px; }
   @media (max-width: 1400px) { #app { --left: 240px; --right: 380px; } }
@@ -150,6 +153,10 @@
         <label class="inline"><input type="checkbox" class="hubKind" value="raw" checked>raw</label>
         <label class="inline"><input type="checkbox" class="hubKind" value="cross_vault" checked>cross-vault</label>
         <label class="inline"><input type="checkbox" class="hubKind" value="missing" checked>missing</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="synthesis" checked>syntheses</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="comparison" checked>comparisons</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="decision" checked>decisions</label>
+        <label class="inline"><input type="checkbox" class="hubKind" value="question" checked>questions</label>
       </div>
       <div class="field">
         <label class="inline"><input type="checkbox" id="onlyHubs">Show only hubs (invert)</label>
@@ -198,8 +205,8 @@
 (() => {
   'use strict';
   const $ = (s) => document.querySelector(s);
-  const KINDS = ['concept', 'entity', 'tag', 'raw', 'cross_vault', 'missing'];
-  const KIND_LABEL = { concept: 'concepts', entity: 'entities', tag: 'tags', raw: 'raw sources', cross_vault: 'cross-vault', missing: 'unresolved' };
+  const KINDS = ['concept', 'entity', 'synthesis', 'comparison', 'decision', 'question', 'tag', 'raw', 'cross_vault', 'missing'];
+  const KIND_LABEL = { concept: 'concepts', entity: 'entities', synthesis: 'syntheses', comparison: 'comparisons', decision: 'decisions', question: 'questions', tag: 'tags', raw: 'raw sources', cross_vault: 'cross-vault', missing: 'unresolved' };
   const CLUSTER_PALETTE = ['#e6194b','#3cb44b','#ffe119','#4363d8','#f58231','#911eb4','#42d4f4','#f032e6','#bfef45','#fabed4','#469990','#dcbeff','#9a6324','#fffac8','#800000','#aaffc3','#808000','#ffd8b1','#000075','#a9a9a9'];
 
   const state = {
@@ -629,7 +636,12 @@
 
   // ---------- File tree ----------
   function renderTree() {
-    const groups = [['concept', 'wiki/concepts'], ['entity', 'wiki/entities'], ['raw', 'raw']];
+    const groups = [
+      ['concept', 'wiki/concepts'], ['entity', 'wiki/entities'],
+      ['synthesis', 'wiki/syntheses'], ['comparison', 'wiki/comparisons'],
+      ['decision', 'wiki/decisions'], ['question', 'wiki/questions'],
+      ['raw', 'raw'],
+    ];
     $('#tree').innerHTML = groups.map(([k, label]) => {
       const items = state.graph.nodes.filter(n => n.kind === k).sort((a, b) => a.id.localeCompare(b.id));
       if (!items.length) return '';

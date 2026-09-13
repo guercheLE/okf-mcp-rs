@@ -1,8 +1,10 @@
 //! Builds the vault's link graph — the data behind the explorer's 3D view.
 //!
-//! Nodes are wiki pages (`concept` / `entity`, by which content dir they
-//! live in), frontmatter tags (`tag`, id `#name` — Obsidian draws these as
-//! their own nodes and they're usually the biggest hubs), raw sources
+//! Nodes are wiki pages (`concept` / `entity` / `synthesis` / `comparison` /
+//! `decision` / `question`, by which content dir they live in — see
+//! `core::vault_resolver::wiki_content_dirs`), frontmatter tags (`tag`, id
+//! `#name` — Obsidian draws these as their own nodes and they're usually
+//! the biggest hubs), raw sources
 //! referenced from `sources:` (`raw`), cross-vault references
 //! (`cross_vault`), and wikilink targets that don't resolve (`missing`,
 //! drawn dim like Obsidian's unresolved links). Links are one per distinct
@@ -330,10 +332,7 @@ pub fn build_graph(vault_root: &Path) -> anyhow::Result<Graph> {
     }
     let mut pages: Vec<PageLinks> = Vec::new();
 
-    for (dir, kind) in wiki_content_dirs(vault_root)
-        .into_iter()
-        .zip(["concept", "entity"])
-    {
+    for (dir, kind) in wiki_content_dirs(vault_root) {
         let mut files = markdown_files_in(&dir)?;
         files.sort();
         for path in files {

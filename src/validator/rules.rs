@@ -55,6 +55,20 @@ struct ParsedConceptPage {
     slug: String,
     sources: Vec<String>,
     links: Vec<WikiLink>,
+    /// The `wiki_content_dirs` kind this page was found under (`concept`,
+    /// `entity`, `synthesis`, `comparison`, `decision`, `question`) — used
+    /// to exempt `question`/`decision` pages from orphan detection (see
+    /// `lint_bundle`'s orphan loop).
+    kind: &'static str,
+}
+
+/// `question`/`decision` pages are naturally less likely to be linked-to —
+/// an open question or a recorded decision is often terminal in the graph
+/// rather than something other pages reference back — so they're exempt
+/// from orphan detection rather than failing `okf-lint --strict` on first
+/// use for content that was never meant to be a link target.
+fn exempt_from_orphan_check(kind: &str) -> bool {
+    matches!(kind, "question" | "decision")
 }
 
 /// Shared with `search::query`'s document collection — both need "every
@@ -91,11 +105,11 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
     let mut existing_slugs: HashSet<String> = HashSet::new();
 
     let mut content_paths = Vec::new();
-    for dir in wiki_content_dirs(vault_root) {
-        content_paths.extend(markdown_files_in(&dir)?);
+    for (dir, kind) in wiki_content_dirs(vault_root) {
+        content_paths.extend(markdown_files_in(&dir)?.into_iter().map(move |p| (p, kind)));
     }
 
-    for path in content_paths {
+    for (path, kind) in content_paths {
         let relative_path = path
             .strip_prefix(vault_root)
             .unwrap_or(&path)
@@ -122,6 +136,7 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
                 .map(|source| source.resource.clone())
                 .collect(),
             links: extract_wikilinks(&parsed.body),
+            kind,
         });
     }
 
@@ -158,7 +173,7 @@ pub fn lint_bundle(vault_root: &Path) -> anyhow::Result<LintReport> {
     }
 
     for page in &pages {
-        if !linked_slugs.contains(&page.slug) {
+        if !linked_slugs.contains(&page.slug) && !exempt_from_orphan_check(page.kind) {
             report.orphan_pages.push(page.relative_path.clone());
         }
     }
@@ -319,6 +334,43 @@ mod tests {
         );
         // Orphans are a warning, not a hard error.
         assert!(!report.has_errors());
+    }
+
+    fn write_page(vault_root: &Path, dir_name: &str, slug: &str, page_type: &str) {
+        let dir = vault_root.join("wiki").join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let content =
+            format!("---\ntype: {page_type}\ntitle: \"{slug}\"\n---\n\n# {slug}\n\nUnlinked.\n");
+        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+    }
+
+    #[test]
+    fn question_and_decision_pages_are_exempt_from_orphan_detection() {
+        // Naturally less likely to be linked-to than a concept/entity page
+        // — flagging them would fail `--strict` unexpectedly on first use.
+        let vault = tempfile::tempdir().unwrap();
+        write_page(vault.path(), "questions", "open-question", "Question");
+        write_page(vault.path(), "decisions", "a-decision", "Decision");
+        // A synthesis page is not exempt — it's still expected to be
+        // reachable like a concept/entity.
+        write_page(vault.path(), "syntheses", "cross-cutting", "Synthesis");
+
+        let report = lint_bundle(vault.path()).unwrap();
+        assert!(
+            !report
+                .orphan_pages
+                .contains(&"wiki/questions/open-question.md".to_string())
+        );
+        assert!(
+            !report
+                .orphan_pages
+                .contains(&"wiki/decisions/a-decision.md".to_string())
+        );
+        assert!(
+            report
+                .orphan_pages
+                .contains(&"wiki/syntheses/cross-cutting.md".to_string())
+        );
     }
 
     #[test]

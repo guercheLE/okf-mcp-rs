@@ -176,7 +176,7 @@ pub async fn list_models(
 fn referenced_raw_ids(vault_root: &Path) -> anyhow::Result<HashSet<String>> {
     let mut ids = HashSet::new();
     let mut content_paths = Vec::new();
-    for dir in wiki_content_dirs(vault_root) {
+    for (dir, _kind) in wiki_content_dirs(vault_root) {
         content_paths.extend(markdown_files_in(&dir)?);
     }
     for path in content_paths {
@@ -527,41 +527,62 @@ where
     Ok((manifest, outcomes, touched_paths))
 }
 
-/// Deterministic table-of-contents regeneration: sorted by title, so
-/// re-running `compile` without any actual content change doesn't produce
-/// git diff noise from incidental ordering. Scans both `wiki/concepts/` and
-/// `wiki/entities/` so entity pages are listed too. Per OKF v0.2 §12, the
-/// bundle-root `index.md` is the *one* place `okf_version` belongs — no
-/// other key is added here.
-pub fn regenerate_index(vault_root: &Path) -> anyhow::Result<()> {
-    let mut entries = Vec::new();
-    let mut content_paths = Vec::new();
-    for dir in wiki_content_dirs(vault_root) {
-        content_paths.extend(markdown_files_in(&dir)?);
+/// Human-readable section heading for a `wiki_content_dirs` "kind" —
+/// `regenerate_index`'s only use of the kind label.
+fn index_heading_for_kind(kind: &str) -> String {
+    match kind {
+        "concept" => "Concepts".to_string(),
+        "entity" => "Entities".to_string(),
+        "synthesis" => "Syntheses".to_string(),
+        "comparison" => "Comparisons".to_string(),
+        "decision" => "Decisions".to_string(),
+        "question" => "Questions".to_string(),
+        other => other.to_string(),
     }
-    for path in content_paths {
-        let content = std::fs::read_to_string(&path)?;
-        if let Ok(parsed) = parse_wiki_page(&content) {
-            let relative = path
-                .strip_prefix(vault_root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            entries.push((
-                parsed.frontmatter.title,
-                relative,
-                parsed.frontmatter.description.unwrap_or_default(),
-            ));
-        }
-    }
-    entries.sort();
+}
 
-    let mut markdown = String::from("---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n\n");
-    for (title, path, description) in entries {
-        if description.is_empty() {
-            markdown.push_str(&format!("- [{title}]({path})\n"));
-        } else {
-            markdown.push_str(&format!("- [{title}]({path}) — {description}\n"));
+/// Deterministic table-of-contents regeneration: one section per
+/// `wiki_content_dirs` entry (in that fixed order), each sorted by title,
+/// so re-running `compile` without any actual content change doesn't
+/// produce git diff noise from incidental ordering. With six content dirs
+/// instead of the original two, grouping by content type keeps the index
+/// legible rather than interleaving concepts, entities, syntheses,
+/// comparisons, decisions, and questions into one flat list. A dir with no
+/// pages yet is omitted entirely rather than printing an empty heading. Per
+/// OKF v0.2 §12, the bundle-root `index.md` is the *one* place
+/// `okf_version` belongs — no other key is added here.
+pub fn regenerate_index(vault_root: &Path) -> anyhow::Result<()> {
+    let mut markdown = String::from("---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n");
+
+    for (dir, kind) in wiki_content_dirs(vault_root) {
+        let mut entries = Vec::new();
+        for path in markdown_files_in(&dir)? {
+            let content = std::fs::read_to_string(&path)?;
+            if let Ok(parsed) = parse_wiki_page(&content) {
+                let relative = path
+                    .strip_prefix(vault_root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                entries.push((
+                    parsed.frontmatter.title,
+                    relative,
+                    parsed.frontmatter.description.unwrap_or_default(),
+                ));
+            }
+        }
+        if entries.is_empty() {
+            continue;
+        }
+        entries.sort();
+
+        markdown.push_str(&format!("\n## {}\n\n", index_heading_for_kind(kind)));
+        for (title, path, description) in entries {
+            if description.is_empty() {
+                markdown.push_str(&format!("- [{title}]({path})\n"));
+            } else {
+                markdown.push_str(&format!("- [{title}]({path}) — {description}\n"));
+            }
         }
     }
     fs_ops::write(vault_root, "wiki/index.md", &markdown)?;
@@ -1004,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn regenerate_index_lists_pages_sorted_by_title_with_descriptions() {
+    fn regenerate_index_lists_pages_sorted_by_title_within_each_content_type_section() {
         let vault = tempfile::tempdir().unwrap();
         write_concept(vault.path(), "zebra", &[]);
         write_concept(vault.path(), "apple", &[]);
@@ -1013,13 +1034,34 @@ mod tests {
         regenerate_index(vault.path()).unwrap();
 
         let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
+        // Grouped by content type (`wiki_content_dirs`'s fixed order), so
+        // the whole "Concepts" section precedes "Entities" — within
+        // "Concepts", apple sorts before zebra by title.
+        let concepts_heading = index.find("## Concepts").unwrap();
+        let entities_heading = index.find("## Entities").unwrap();
         let apple_pos = index.find("apple").unwrap();
-        let mango_pos = index.find("mango").unwrap();
         let zebra_pos = index.find("zebra").unwrap();
-        assert!(apple_pos < mango_pos);
-        assert!(mango_pos < zebra_pos);
+        let mango_pos = index.find("mango").unwrap();
+        assert!(concepts_heading < apple_pos);
+        assert!(apple_pos < zebra_pos);
+        assert!(zebra_pos < entities_heading);
+        assert!(entities_heading < mango_pos);
         assert!(index.contains("about apple"));
         assert!(index.contains("wiki/entities/mango.md"));
+    }
+
+    #[test]
+    fn regenerate_index_omits_a_content_type_heading_when_that_dir_has_no_pages() {
+        let vault = tempfile::tempdir().unwrap();
+        write_concept(vault.path(), "solo", &[]);
+
+        regenerate_index(vault.path()).unwrap();
+
+        let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
+        assert!(index.contains("## Concepts"));
+        assert!(!index.contains("## Entities"));
+        assert!(!index.contains("## Syntheses"));
+        assert!(!index.contains("## Questions"));
     }
 
     #[test]
@@ -1055,7 +1097,7 @@ mod tests {
         let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
         assert_eq!(
             index.trim(),
-            "---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n\n- [bare](wiki/concepts/bare.md)"
+            "---\nokf_version: \"0.2\"\n---\n\n# Wiki Index\n\n## Concepts\n\n- [bare](wiki/concepts/bare.md)"
                 .trim()
         );
         assert!(!index.contains("—"));

@@ -89,7 +89,7 @@ fn collect_documents(vault_root: &Path) -> anyhow::Result<Vec<CollectedDocument>
     }
 
     let mut content_paths = Vec::new();
-    for dir in wiki_content_dirs(vault_root) {
+    for (dir, _kind) in wiki_content_dirs(vault_root) {
         content_paths.extend(markdown_files_in(&dir)?);
     }
     for path in content_paths {
