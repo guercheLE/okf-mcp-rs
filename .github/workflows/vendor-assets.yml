@@ -1,0 +1,43 @@
+name: Vendor assets
+
+# assets/vendor/*.min.js (mermaid, 3d-force-graph) are committed to git
+# because they're read via `include_str!` at compile time and need to be
+# present for offline/reproducible builds and crates.io publishing -- a
+# build.rs network fetch isn't reliable enough for that. This workflow is
+# the auditable path for updating or re-publishing them: it re-downloads
+# the pinned versions from scripts/fetch-vendor-assets.sh, verifies the
+# sha256 pinned in that script, and publishes the result as assets on a
+# standing "vendor-assets" release, so they can be inspected or reused
+# without cloning the whole repo and its history.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/fetch-vendor-assets.sh
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch and verify vendor assets
+        run: ./scripts/fetch-vendor-assets.sh fetch
+      - name: Fail if the fetch changed anything already committed
+        # The script is pinned to the same versions/checksums as what's in
+        # git, so a diff here means the committed files were hand-edited
+        # (or tampered with) without updating the pin -- fail loudly rather
+        # than silently publishing a mismatched release asset.
+        run: git diff --exit-code -- assets/vendor/
+      - name: Publish as release assets
+        uses: softprops/action-gh-release@v3.0.1
+        with:
+          tag_name: vendor-assets
+          name: Vendor assets
+          body: |
+            Third-party JS bundles vendored under `assets/vendor/`, re-published here for inspection/reuse. See `scripts/fetch-vendor-assets.sh` for pinned versions and checksums.
+          files: assets/vendor/*.min.js
