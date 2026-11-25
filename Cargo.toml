@@ -1,7 +1,7 @@
 [package]
 name = "okf-mcp"
 default-run = "okf-mcp"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2024"
 # Verified by actually building with `cargo +1.88 check --all-targets`
 # (the oldest toolchain on hand) — 1.88 is also when let-chains (used

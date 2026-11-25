@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file, reconstructed retrospectively from git history in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] - 2026-11-25
+
+### Security
+- `rusqlite` 0.32 → 0.41 (RUSTSEC-2026-0459 / CVE-2026-119375: bundled SQLite could return uninitialized page-cache memory for a database opened alongside a mismatched-page-size `-wal` file).
+- `rmcp` 2.2.0 → 3.11.0 (RUSTSEC-2026-0457: OAuth client SSRF via an unresolved-address check; RUSTSEC-2026-0462: unbounded response-body buffering in the streamable-HTTP client) — neither is reachable from how this server actually uses rmcp (stdio/streamable-HTTP server only, no OAuth client), but the fix cost nothing to take. The only break: `ServerHandler::get_info`'s return type is now `ServerConfig` (`ServerInfo` is a deprecated alias).
+- Replaced `chrono` (RUSTSEC-2026-0543: unmaintained, no upgrade path) with `jiff` for this crate's own timestamps; chrono is still pulled in transitively by rmcp/schemars.
+- `cargo update` picked up non-breaking fixes for zstd/zstd-safe/zstd-sys (RUSTSEC-2026-0403/0410), a yanked async-executor/chacha20, and keyring 4.1.5 → 4.2.0.
+- Added `deny.toml` (`cargo deny check` in CI) and `.gitleaks.toml` (`gitleaks` in CI). Documented, with justification, the advisories that have no fix available yet: `zip` (via docx-rs, which still pins `^8.6.0`) and a handful of transitive unmaintained-with-no-upgrade crates (zvariant family via keyring, fxhash via inquire, paste, ttf-parser, unsafe-libyaml).
+- Added `SECURITY.md`.
+
+### Changed
+- `core/mcp_server.rs`, `compiler/driver.rs`, and `cli/setup_wizard.rs` (each 1400+ lines) split into per-stage submodules — pure code motion, no behavior change.
+- Removed every `unsafe` env-var mutation outside one legitimate FFI call: production code now passes config straight through instead of round-tripping via env vars, and tests use `temp-env` instead of hand-rolled `unsafe` save/restore.
+- Added `#![cfg_attr(not(test), warn(clippy::unwrap_used))]` after fixing the handful of real `.unwrap()` risk in production code; the great majority of the previously-flagged `.unwrap()` calls were already ordinary test code.
+- Added `rust-version` and a `[lints.clippy]` table to `Cargo.toml`.
+
+### Added
+- `scripts/fetch-vendor-assets.sh` and a `vendor-assets` CI workflow that re-download and checksum-verify the vendored `mermaid.min.js`/`3d-force-graph.min.js`, publishing them as release assets.
+
 ## [0.13.0] - 2026-09-13
 
 ### Added
