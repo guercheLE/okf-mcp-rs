@@ -12,12 +12,12 @@ static COUNTERS: LazyLock<Mutex<HashMap<String, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn increment(name: &str) {
-    let mut counters = COUNTERS.lock().unwrap();
+    let mut counters = COUNTERS.lock().expect("metrics counters mutex poisoned");
     *counters.entry(name.to_string()).or_insert(0) += 1;
 }
 
 pub fn render_metrics() -> String {
-    let counters = COUNTERS.lock().unwrap();
+    let counters = COUNTERS.lock().expect("metrics counters mutex poisoned");
     let mut lines: Vec<String> = counters
         .iter()
         .map(|(name, value)| format!("{name} {value}"))

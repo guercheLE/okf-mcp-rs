@@ -814,7 +814,11 @@ fn print_mcp_client_config(
                 }
             });
             println!("\nMCP client config (stdio):");
-            println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&config)
+                    .expect("built from only strings/maps/arrays; always serializes")
+            );
         }
         Transport::Http => {
             let (_, header_name) = okf_mcp::auth::auth_manager::header_location_for(auth_method);
@@ -835,7 +839,11 @@ fn print_mcp_client_config(
                 "\nMCP client config (http) — adjust the host/port to match how you run \
                  `okf-mcp http`:"
             );
-            println!("{}", serde_json::to_string_pretty(&config).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&config)
+                    .expect("built from only strings/maps/arrays; always serializes")
+            );
             println!(
                 "Credentials are never read from local config/env over HTTP transport — \
                  every request must carry its own \"{header_name}\" header."

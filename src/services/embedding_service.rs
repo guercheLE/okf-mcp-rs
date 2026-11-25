@@ -62,7 +62,7 @@ fn model() -> &'static Mutex<TextEmbedding> {
 /// the sentence-transformers reference implementation).
 pub fn embed(text: &str) -> anyhow::Result<Vec<f32>> {
     let model = model();
-    let mut model = model.lock().unwrap();
+    let mut model = model.lock().expect("embedding model mutex poisoned");
     let mut embeddings = model.embed(vec![text], None)?;
     embeddings
         .pop()

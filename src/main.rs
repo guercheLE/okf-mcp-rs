@@ -7,6 +7,10 @@
 // these into two compiled entry points the way `targets::typescript`'s
 // index.ts/cli.ts pair does.
 
+// See lib.rs's copy of this attribute for why `not(test)` rather than a
+// bare `warn(...)`.
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
+
 mod cli;
 
 use std::sync::Arc;

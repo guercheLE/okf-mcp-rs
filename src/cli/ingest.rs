@@ -29,7 +29,11 @@ pub async fn run(source: &str, tags: &[String], vault: Option<&str>) -> anyhow::
             output.line(&format!(
                 "Ingested '{}' -> {raw_id} ({})",
                 report.source_uri,
-                report.raw_path.as_ref().unwrap().display()
+                report
+                    .raw_path
+                    .as_ref()
+                    .expect("process_ingest sets raw_path for every New outcome")
+                    .display()
             ));
         }
         IngestOutcome::Superseded {
@@ -39,7 +43,11 @@ pub async fn run(source: &str, tags: &[String], vault: Option<&str>) -> anyhow::
             output.line(&format!(
                 "Updated '{}' -> {raw_id} (superseded {previous_raw_id}) ({})",
                 report.source_uri,
-                report.raw_path.as_ref().unwrap().display()
+                report
+                    .raw_path
+                    .as_ref()
+                    .expect("process_ingest sets raw_path for every Superseded outcome")
+                    .display()
             ));
         }
     }

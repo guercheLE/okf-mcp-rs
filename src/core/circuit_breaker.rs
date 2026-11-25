@@ -70,7 +70,7 @@ impl CircuitBreaker {
         Fut: Future<Output = Result<T, E>>,
     {
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
             if inner.state == State::Open {
                 let elapsed = inner.opened_at.map(|at| at.elapsed()).unwrap_or_default();
                 if elapsed < self.reset_timeout {
@@ -93,13 +93,13 @@ impl CircuitBreaker {
     }
 
     fn on_success(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
         inner.failure_count = 0;
         inner.state = State::Closed;
     }
 
     fn on_failure(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
         inner.failure_count += 1;
         if inner.state == State::HalfOpen || inner.failure_count >= self.failure_threshold {
             inner.state = State::Open;

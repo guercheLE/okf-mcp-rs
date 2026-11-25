@@ -11,14 +11,19 @@ static CLEANUP_FNS: Mutex<Vec<CleanupFn>> = Mutex::new(Vec::new());
 /// Registers a cleanup callback, run in reverse registration order during
 /// shutdown.
 pub fn on_shutdown(f: CleanupFn) {
-    CLEANUP_FNS.lock().unwrap().push(f);
+    CLEANUP_FNS
+        .lock()
+        .expect("shutdown cleanup-fns mutex poisoned")
+        .push(f);
 }
 
 async fn shutdown(signal: &str) {
     tracing::info!(signal, "shutting down");
 
     let fns: Vec<CleanupFn> = {
-        let mut guard = CLEANUP_FNS.lock().unwrap();
+        let mut guard = CLEANUP_FNS
+            .lock()
+            .expect("shutdown cleanup-fns mutex poisoned");
         std::mem::take(&mut *guard)
     };
     for f in fns.into_iter().rev() {

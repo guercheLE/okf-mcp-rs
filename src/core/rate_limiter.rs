@@ -24,7 +24,7 @@ impl RateLimiter {
 
     pub fn acquire(&self) -> Result<(), McpifyError> {
         let now = Instant::now();
-        let mut timestamps = self.timestamps.lock().unwrap();
+        let mut timestamps = self.timestamps.lock().expect("rate limiter mutex poisoned");
         timestamps.retain(|&t| now.duration_since(t) < self.window);
 
         if timestamps.len() >= self.limit {

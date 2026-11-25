@@ -12,6 +12,10 @@
 //   binary has to make that transport-aware decision itself rather than
 //   the Dockerfile choosing between two different check commands.
 
+// See lib.rs's copy of this attribute for why `not(test)` rather than a
+// bare `warn(...)`.
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
