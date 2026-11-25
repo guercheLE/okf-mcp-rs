@@ -1,0 +1,11 @@
+# Extends gitleaks' own default ruleset (https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml)
+# rather than redefining rules — this file only adds this repo's own
+# allowlist on top.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vendored third-party assets and test fixtures, not this repo's own secrets"
+paths = [
+  '''assets/vendor/.*''',
+]

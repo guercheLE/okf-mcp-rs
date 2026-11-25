@@ -216,7 +216,7 @@ pub fn search_vectors(
          WHERE v.embedding MATCH ?1 AND k = ?2
          ORDER BY v.distance",
     )?;
-    let rows = stmt.query_map(params![blob, limit], |row| {
+    let rows = stmt.query_map(params![blob, limit as i64], |row| {
         Ok(VectorHit {
             section_key: row.get(0)?,
             path: row.get(1)?,

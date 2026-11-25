@@ -185,7 +185,7 @@ pub fn reindex(
                 &document.doc_type,
                 &document.title,
                 &content_hash,
-                &chrono::Utc::now().to_rfc3339(),
+                &jiff::Timestamp::now().to_string(),
             )?;
 
             if needs_reembedding {

@@ -3,6 +3,10 @@ name = "okf-mcp"
 default-run = "okf-mcp"
 version = "0.13.0"
 edition = "2024"
+# Verified by actually building with `cargo +1.88 check --all-targets`
+# (the oldest toolchain on hand) — 1.88 is also when let-chains (used
+# throughout, e.g. `if let Some(x) = y && cond`) stabilized.
+rust-version = "1.88"
 description = "OKF (Open Knowledge Format) pipeline: ingest, compile, lint, reindex, and search a Git-native knowledge base, as an MCP server and CLI."
 repository = "https://github.com/guercheLE/okf-mcp-rs"
 license = "MIT"
@@ -27,7 +31,7 @@ path = "src/bin/healthcheck.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
-rmcp = { version = "2", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3", features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
 # rustls-tls-native-roots (on top of rustls-tls's webpki-roots) makes
 # rustls also trust certs from the OS trust store, not just Mozilla's
@@ -54,7 +58,7 @@ serde_yaml = "0.9"
 # they match the format used by the OKF pipeline design doc.
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup"] }
+rusqlite = { version = "0.41", features = ["bundled", "load_extension", "backup"] }
 sqlite-vec = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
@@ -76,7 +80,7 @@ url = "2"
 dhat = { version = "0.3", optional = true }
 pdf-extract = "0.12.0"
 docx-rs = "0.4.22"
-chrono = "0.4.45"
+jiff = "1"
 tantivy = "0.26.1"
 genai = { version = "0.6.5", default-features = false, features = ["rustls-tls"] }
 # `okf-mcp explore`: markdown → HTML for the note pane, and launching the
@@ -99,5 +103,15 @@ tempfile = "3"
 rand = "0.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-rmcp = { version = "2", features = ["client"] }
+rmcp = { version = "3", features = ["client"] }
 temp-env = { version = "0.3", features = ["async_closure"] }
+
+# Applies uniformly to every target, tests included — unlike
+# `clippy::unwrap_used` (see lib.rs/main.rs/bin/healthcheck.rs's own
+# `#![cfg_attr(not(test), warn(...))]`, which needs to exempt test code
+# and so can't live here), nothing below has a legitimate reason to fire
+# in a test either.
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

@@ -44,7 +44,7 @@ const HEADER: &str = "# Compile Log\n\nAppend-only summary of each compile/fix/c
 /// this human-readable summary couldn't be appended — see each call site's
 /// own handling of this function's `Result`.
 pub fn append(vault_root: &Path, source: &str, status: &str, detail: &str) -> anyhow::Result<()> {
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    let timestamp = jiff::Timestamp::now().to_string();
     let line = format!("- {timestamp} [{source}] {status}: {detail}\n");
 
     let path = sandbox_path(vault_root, "wiki/log.md")?;

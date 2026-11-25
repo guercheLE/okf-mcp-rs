@@ -50,7 +50,7 @@ pub async fn process_ingest(
 
     let hash = frontmatter::hash_content(&content);
     let raw_id = frontmatter::raw_id_for(&hash);
-    let ingested_at = chrono::Utc::now().to_rfc3339();
+    let ingested_at = jiff::Timestamp::now().to_string();
 
     let mut manifest = manifest::store::load(vault_root)?;
     let outcome = manifest.record_ingest(&source_uri, &hash, &raw_id, &ingested_at);
@@ -144,7 +144,7 @@ pub fn delete_source(
     };
 
     let mut manifest = manifest::store::load(vault_root)?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = jiff::Timestamp::now().to_string();
 
     if purge {
         let removed = manifest

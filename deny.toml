@@ -1,0 +1,77 @@
+# `cargo deny check` — run in CI via EmbarkStudios/cargo-deny-action.
+# Sections not listed here (bans, sources) use cargo-deny's own defaults,
+# which already deny an unknown registry/git source and only warn on
+# duplicate dependency versions.
+
+[advisories]
+ignore = [
+    # zvariant/zvariant_derive/zbus_names: merged into zbus 6.0 (as its
+    # `wire`/`names` modules), no longer maintained standalone. Pulled in
+    # transitively by keyring's Linux secret-service backend (keyring ->
+    # secret-service -> zbus 5.x); each advisory itself says "No safe
+    # upgrade is available" until keyring/secret-service bump their own
+    # zbus dependency to 6.x. Re-check whenever `cargo update -p keyring`
+    # picks up a newer secret-service/zbus.
+    "RUSTSEC-2026-0370", # zvariant unmaintained
+    "RUSTSEC-2026-0372", # zvariant_derive unmaintained
+    "RUSTSEC-2026-0371", # zbus_names unmaintained
+    # fxhash: unmaintained, no safe upgrade. Pulled in by inquire (the
+    # setup wizard's prompt library) — upstream's choice, not ours to fix.
+    "RUSTSEC-2025-0057",
+    # paste: unmaintained, no safe upgrade. Pulled in by genai, rav1e (via
+    # image, via docx-rs/fastembed) and tokenizers (via fastembed) — all
+    # upstream's choice.
+    "RUSTSEC-2024-0436",
+    # ttf-parser: unmaintained, no safe upgrade. Pulled in by lopdf, via
+    # pdf-extract (PDF ingest) — upstream's choice.
+    "RUSTSEC-2026-0192",
+    # unsafe-libyaml: unmaintained, no safe upgrade. Pulled in by
+    # serde_yaml (itself deprecated upstream) for config.yml
+    # read/write — see config_manager.rs/setup_wizard's persistence.rs.
+    # Revisit if/when this crate moves off serde_yaml.
+    "RUSTSEC-2024-0449",
+    # chrono: unmaintained, no safe upgrade — we migrated our own direct
+    # usage to jiff (src/ingest/pipeline.rs, src/search/query.rs,
+    # src/storage/wiki_log.rs), but it's still pulled in transitively by
+    # rmcp/schemars themselves. Revisit once rmcp drops it.
+    "RUSTSEC-2026-0543",
+    # zip: docx-rs 0.4.22 pins `zip = "8.6.0"` (6 known advisories fixed in
+    # zip 9.x — path/symlink-escape and DoS bugs in ZipArchive::extract,
+    # relevant since this reads attacker-suppliable .docx files during
+    # ingest). Tried forcing zip >=9.0 via `[patch.crates-io]`: Cargo
+    # refuses — a patch can swap a dependency's *source*, not relax the
+    # *version requirement* docx-rs itself declares (`^8.6.0`), so it
+    # can't be overridden without forking docx-rs to bump its own zip
+    # dependency. Revisit when docx-rs does that upstream.
+    "RUSTSEC-2026-0367", # SUID/SGID bits preserved on extract
+    "RUSTSEC-2026-0368", # symlink target escapes destination
+    "RUSTSEC-2026-0369", # permissions applied through unconfined symlink
+    "RUSTSEC-2026-0429", # declared-size allocation aborts the process
+    "RUSTSEC-2026-0545", # AES auth code not checked on truncated/empty data
+    "RUSTSEC-2026-0546", # chained-symlink escapes destination
+    "RUSTSEC-2026-0547", # legacy decoder preallocation DoS
+    "RUSTSEC-2026-0548", # ZipStreamReader local-header name mismatch
+]
+
+[licenses]
+# Every license actually in this dependency tree as of this writing
+# (`cargo deny check licenses` lists the rejected ones to re-derive this).
+# All permissive; nothing copyleft-beyond-MPL's file-level scope.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0", # webpki-root-certs/webpki-roots: CA cert data, not code
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0", # option-ext; file-level copyleft, fine for a binary dependency
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "Zlib",
+]
+confidence-threshold = 0.8

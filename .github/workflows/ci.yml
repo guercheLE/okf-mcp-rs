@@ -25,3 +25,23 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --locked --features profiling --test cli_smoke profiling_feature_records_warmed_search_and_non_search_commands -- --exact
       - run: bash scripts/coverage.sh
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # gitleaks scans the whole history by default — a shallow clone
+          # would only let it see this one commit.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
