@@ -208,16 +208,6 @@ pub fn all_known_credential_accounts(config: &crate::core::config_schema::Config
     accounts
 }
 
-/// Guards every test (in this file and in `config_manager`'s) that mutates
-/// the process-global `HOME` env var. `encryption_key()` derives its key
-/// from `resolve_home_dir()`, so without this lock, `cargo test`'s default
-/// parallel execution can interleave two tests' `HOME` changes — e.g.
-/// another test restoring `HOME` in the gap between this file's
-/// save-then-load — and a save/load pair ends up using two different
-/// derived keys, breaking decryption non-deterministically.
-#[cfg(test)]
-pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,58 +229,41 @@ mod tests {
         // `save_credential`/`load_credential`, since the OS keychain (the
         // primary path) may or may not be available in the test
         // environment and this test should be deterministic either way.
-        let _guard = HOME_ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        //
+        // `encryption_key()` derives its key from `resolve_home_dir()`, so
+        // `HOME` must stay pinned to `dir` for this whole closure — plain
+        // `cargo test` parallelism would otherwise let another test's
+        // `HOME` change interleave with this one and derive from the wrong
+        // directory. `temp_env::with_var` holds its own lock across every
+        // other `temp_env` call (here, in `config_manager`'s, and
+        // `embedding_service`'s) for exactly this, so no separate
+        // `HOME_ENV_TEST_LOCK` is needed any more.
         let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: test-only env mutation, serialized by HOME_ENV_TEST_LOCK
-        // across every test (in this file and config_manager's) that
-        // touches HOME.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-        }
+        temp_env::with_var("HOME", Some(dir.path()), || {
+            save_to_file("test-account", "s3cr3t").unwrap();
+            let loaded = load_from_file("test-account").unwrap();
+            assert_eq!(loaded.as_deref(), Some("s3cr3t"));
 
-        save_to_file("test-account", "s3cr3t").unwrap();
-        let loaded = load_from_file("test-account").unwrap();
-        assert_eq!(loaded.as_deref(), Some("s3cr3t"));
-
-        delete_from_file("test-account").unwrap();
-        assert_eq!(load_from_file("test-account").unwrap(), None);
-
-        // SAFETY: same guard as above.
-        unsafe {
-            match prev_home {
-                Some(prev) => std::env::set_var("HOME", prev),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+            delete_from_file("test-account").unwrap();
+            assert_eq!(load_from_file("test-account").unwrap(), None);
+        });
     }
 
     #[test]
     fn credential_exists_reflects_save_and_delete() {
-        let _guard = HOME_ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // See `file_fallback_round_trips_a_credential` above for why `HOME`
+        // is pinned via `temp_env` for the whole closure.
         let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: test-only env mutation, serialized by HOME_ENV_TEST_LOCK.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-        }
+        temp_env::with_var("HOME", Some(dir.path()), || {
+            let account = "credential-exists-test-account";
+            assert!(!credential_exists(account).unwrap());
 
-        let account = "credential-exists-test-account";
-        assert!(!credential_exists(account).unwrap());
+            save_credential(account, "s3cr3t").unwrap();
+            assert!(credential_exists(account).unwrap());
 
-        save_credential(account, "s3cr3t").unwrap();
-        assert!(credential_exists(account).unwrap());
-
-        delete_credential(account).unwrap();
-        assert!(!credential_exists(account).unwrap());
-
-        // SAFETY: same guard as above.
-        unsafe {
-            match prev_home {
-                Some(prev) => std::env::set_var("HOME", prev),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+            delete_credential(account).unwrap();
+            assert!(!credential_exists(account).unwrap());
+        });
     }
 
     fn default_config() -> crate::core::config_schema::Config {

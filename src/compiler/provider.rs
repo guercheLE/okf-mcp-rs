@@ -184,7 +184,7 @@ pub fn parse_model_spec(spec: &str) -> anyhow::Result<(&str, &str)> {
 
 /// Whether `name` is set to a real, non-blank value — `std::env::var`
 /// alone returns `Ok("")` for a var that's set but empty, which would
-/// otherwise make `seed_env_from_credential_storage` treat a stray blank
+/// otherwise make `resolve_api_key` treat a stray blank
 /// env var (leftover shell export, inherited from an MCP host's spawn
 /// env, etc.) as "already configured" and silently skip the correctly
 /// saved credential.
@@ -194,22 +194,20 @@ pub fn env_var_is_meaningfully_set(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// If `env_name` isn't meaningfully set, seeds it from the OS
-/// keychain/encrypted-file credential saved under account `"llm-<provider>"`
-/// by `okf-mcp setup` — so a key saved there works without the caller
-/// having to `export` it manually first.
-fn seed_env_from_credential_storage(env_name: &str, provider: &str) {
+/// `env_name` if meaningfully set, else the OS keychain/encrypted-file
+/// credential saved under account `"llm-<provider>"` by `okf-mcp setup` —
+/// so a key saved there works without the caller having to `export` it
+/// manually first. Returns the resolved key value directly (rather than
+/// mutating the process's own env, which `AuthData::from_env` would then
+/// re-read) so callers can feed it straight into `AuthData::from_single`.
+fn resolve_api_key(env_name: &str, provider: &str) -> Option<String> {
     if env_var_is_meaningfully_set(env_name) {
-        return;
+        return std::env::var(env_name).ok();
     }
-    if let Ok(Some(key)) = load_credential(&format!("llm-{provider}")) {
-        // SAFETY: called before any concurrent work touches this process's
-        // env vars — `compile`/`rebuild` resolve the model spec once, up
-        // front, before spawning any per-source work.
-        unsafe {
-            std::env::set_var(env_name, key.trim());
-        }
-    }
+    load_credential(&format!("llm-{provider}"))
+        .ok()
+        .flatten()
+        .map(|key| key.trim().to_string())
 }
 
 /// Deterministic per-name env var for an ad-hoc/named custom provider's API
@@ -282,12 +280,16 @@ pub fn resolve_provider_target(
                 .then(|| synthetic_api_key_env_name(provider))
         });
 
-    if let Some(env_name) = &api_key_env {
-        seed_env_from_credential_storage(env_name, provider);
-    }
-
     let auth = match &api_key_env {
-        Some(env_name) => AuthData::from_env(env_name.as_str()),
+        // A concrete value (env var or keychain) goes straight to
+        // `AuthData::from_single` — only fall back to `from_env` (which
+        // re-reads the env var, and produces its own "not set" diagnostic
+        // naming it) when neither source had anything, so that error still
+        // names the right env var.
+        Some(env_name) => match resolve_api_key(env_name, provider) {
+            Some(key) => AuthData::from_single(key),
+            None => AuthData::from_env(env_name.as_str()),
+        },
         // `AdapterKind::OpenAI`'s shared request-building path always
         // resolves `AuthData::single_key_value()` to build the
         // `Authorization` header, which errors
@@ -592,15 +594,16 @@ mod tests {
     async fn list_models_for_custom_without_a_base_url_fails_clearly() {
         // "custom" has no hardcoded default base URL — without a vault
         // override or CUSTOM_LLM_BASE_URL set, resolution must fail with a
-        // clear message rather than panicking or hanging.
-        // SAFETY: test-only env mutation; ensures a stray var from another
-        // test/process doesn't make this one flaky.
-        unsafe {
-            std::env::remove_var("CUSTOM_LLM_BASE_URL");
-        }
-        let driver = LLMCompilerDriver::new();
-        let err = driver.list_models("custom", None, None).await.unwrap_err();
-        assert!(err.to_string().contains("no default base URL"));
+        // clear message rather than panicking or hanging. Unsetting it via
+        // `temp_env` (rather than a raw `unsafe` mutation) ensures a stray
+        // var from another test/process doesn't make this flaky, and
+        // serializes against every other `temp_env` call in the crate.
+        temp_env::async_with_vars([("CUSTOM_LLM_BASE_URL", None::<&str>)], async {
+            let driver = LLMCompilerDriver::new();
+            let err = driver.list_models("custom", None, None).await.unwrap_err();
+            assert!(err.to_string().contains("no default base URL"));
+        })
+        .await;
     }
 
     #[test]
@@ -652,19 +655,20 @@ mod tests {
         // `Authorization` header — every real compile call against it
         // failed with `ResolverAuthDataNotSingleValue` before this fix,
         // even though the provider needs no key at all.
-        unsafe {
-            std::env::set_var("FOUNDRY_LOCAL_ENDPOINT", "http://localhost:5272/v1/");
-        }
-        let (adapter_kind, _, auth) = resolve_provider_target("foundry-local", None, None).unwrap();
-        assert_eq!(adapter_kind, AdapterKind::OpenAI);
-        assert!(
-            auth.single_key_value().is_ok(),
-            "AuthData must resolve to a single value so the OpenAI adapter's \
-             Authorization-header-building step doesn't error"
+        temp_env::with_var(
+            "FOUNDRY_LOCAL_ENDPOINT",
+            Some("http://localhost:5272/v1/"),
+            || {
+                let (adapter_kind, _, auth) =
+                    resolve_provider_target("foundry-local", None, None).unwrap();
+                assert_eq!(adapter_kind, AdapterKind::OpenAI);
+                assert!(
+                    auth.single_key_value().is_ok(),
+                    "AuthData must resolve to a single value so the OpenAI adapter's \
+                     Authorization-header-building step doesn't error"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("FOUNDRY_LOCAL_ENDPOINT");
-        }
     }
 
     #[test]
@@ -691,30 +695,30 @@ mod tests {
         // check, in one test — both touch the same process-global env var,
         // and cargo test runs tests concurrently by default, so splitting
         // them into two tests would race on CLAUDE_MAX_API_PROXY_ENDPOINT.
-        unsafe {
-            std::env::remove_var("CLAUDE_MAX_API_PROXY_ENDPOINT");
-        }
-        let (adapter_kind, endpoint, auth) =
-            resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
-        assert_eq!(adapter_kind, AdapterKind::OpenAI);
-        assert_eq!(endpoint.base_url(), "http://localhost:3456/v1/");
-        assert!(
-            auth.single_key_value().is_ok(),
-            "AuthData must resolve to a single value so the OpenAI adapter's \
-             Authorization-header-building step doesn't error"
-        );
+        temp_env::with_var_unset("CLAUDE_MAX_API_PROXY_ENDPOINT", || {
+            let (adapter_kind, endpoint, auth) =
+                resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
+            assert_eq!(adapter_kind, AdapterKind::OpenAI);
+            assert_eq!(endpoint.base_url(), "http://localhost:3456/v1/");
+            assert!(
+                auth.single_key_value().is_ok(),
+                "AuthData must resolve to a single value so the OpenAI adapter's \
+                 Authorization-header-building step doesn't error"
+            );
+        });
 
         // The env var exists specifically because the proxy's actual port is
         // a local run-time choice — must be overridable like foundry-local,
         // e.g. for anyone who did rebind it elsewhere.
-        unsafe {
-            std::env::set_var("CLAUDE_MAX_API_PROXY_ENDPOINT", "http://localhost:9999/v1");
-        }
-        let (_, endpoint, _) = resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
-        assert_eq!(endpoint.base_url(), "http://localhost:9999/v1/");
-        unsafe {
-            std::env::remove_var("CLAUDE_MAX_API_PROXY_ENDPOINT");
-        }
+        temp_env::with_var(
+            "CLAUDE_MAX_API_PROXY_ENDPOINT",
+            Some("http://localhost:9999/v1"),
+            || {
+                let (_, endpoint, _) =
+                    resolve_provider_target("claude-max-api-proxy", None, None).unwrap();
+                assert_eq!(endpoint.base_url(), "http://localhost:9999/v1/");
+            },
+        );
     }
 
     #[test]
@@ -867,44 +871,40 @@ mod tests {
     }
 
     #[test]
-    fn seed_env_from_credential_storage_does_not_overwrite_an_already_set_var() {
-        // SAFETY: test-only env mutation; this var name is unique to this
-        // test so it can't race with other tests touching real provider vars.
-        unsafe {
-            std::env::set_var("OKF_TEST_SEED_VAR", "already-set");
-        }
-        seed_env_from_credential_storage("OKF_TEST_SEED_VAR", "does-not-matter");
-        assert_eq!(std::env::var("OKF_TEST_SEED_VAR").unwrap(), "already-set");
-        unsafe {
-            std::env::remove_var("OKF_TEST_SEED_VAR");
-        }
+    fn resolve_api_key_prefers_an_already_set_var_over_credential_storage() {
+        // This var name is unique to this test so it can't collide with
+        // another test's own value; `temp_env::with_var` also serializes
+        // against every other `temp_env` call in the crate.
+        let resolved = temp_env::with_var("OKF_TEST_SEED_VAR", Some("already-set"), || {
+            resolve_api_key("OKF_TEST_SEED_VAR", "does-not-matter")
+        });
+        assert_eq!(resolved, Some("already-set".to_string()));
+    }
+
+    #[test]
+    fn resolve_api_key_falls_back_to_none_when_neither_source_has_a_value() {
+        let resolved = temp_env::with_var_unset("OKF_TEST_SEED_VAR_UNSET", || {
+            resolve_api_key("OKF_TEST_SEED_VAR_UNSET", "no-such-provider-in-keychain")
+        });
+        assert_eq!(resolved, None);
     }
 
     #[test]
     fn env_var_is_meaningfully_set_treats_blank_and_whitespace_only_as_unset() {
-        // SAFETY: test-only env mutation; this var name is unique to this test.
-        unsafe {
-            std::env::remove_var("OKF_TEST_MEANINGFUL_VAR");
-        }
-        assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        temp_env::with_var_unset("OKF_TEST_MEANINGFUL_VAR", || {
+            assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        });
 
-        unsafe {
-            std::env::set_var("OKF_TEST_MEANINGFUL_VAR", "");
-        }
-        assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        temp_env::with_var("OKF_TEST_MEANINGFUL_VAR", Some(""), || {
+            assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        });
 
-        unsafe {
-            std::env::set_var("OKF_TEST_MEANINGFUL_VAR", "   ");
-        }
-        assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        temp_env::with_var("OKF_TEST_MEANINGFUL_VAR", Some("   "), || {
+            assert!(!env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        });
 
-        unsafe {
-            std::env::set_var("OKF_TEST_MEANINGFUL_VAR", "real-value");
-        }
-        assert!(env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
-
-        unsafe {
-            std::env::remove_var("OKF_TEST_MEANINGFUL_VAR");
-        }
+        temp_env::with_var("OKF_TEST_MEANINGFUL_VAR", Some("real-value"), || {
+            assert!(env_var_is_meaningfully_set("OKF_TEST_MEANINGFUL_VAR"));
+        });
     }
 }

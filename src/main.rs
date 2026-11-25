@@ -266,8 +266,36 @@ enum VaultCommand {
 /// -> logger -> tracing -> registry -> shutdown-handler -> db -> auth ->
 /// McpServer -> pick transport -> health checks. Mirrors
 /// `targets::typescript`'s `index.ts` `main()`.
-async fn run_harness_server() -> anyhow::Result<()> {
-    let config = load_config(serde_json::Map::new())?;
+///
+/// `transport`/`host`/`port`/`cors_allow` come from the `start`/`http` CLI
+/// subcommand and are fed to `load_config` as its `cli_flags` layer — the
+/// cascade's highest-priority input (REQ-2.2) — rather than through
+/// process env vars, so picking a transport needs no `unsafe` env
+/// mutation.
+async fn run_harness_server(
+    transport: Transport,
+    host: Option<String>,
+    port: Option<u16>,
+    cors_allow: Option<String>,
+) -> anyhow::Result<()> {
+    let mut cli_flags = serde_json::Map::new();
+    cli_flags.insert(
+        "transport".to_string(),
+        serde_json::to_value(transport).expect("Transport always serializes"),
+    );
+    if let Some(host) = host {
+        cli_flags.insert("host".to_string(), serde_json::Value::String(host));
+    }
+    if let Some(port) = port {
+        cli_flags.insert("port".to_string(), serde_json::Value::Number(port.into()));
+    }
+    if let Some(cors_allow) = cors_allow {
+        cli_flags.insert(
+            "cors_allow".to_string(),
+            serde_json::Value::String(cors_allow),
+        );
+    }
+    let config = load_config(cli_flags)?;
 
     let (otel_layer, otel_provider) = match otel::build_layer("okf-mcp") {
         Ok((layer, provider)) => (Some(layer), Some(provider)),
@@ -398,35 +426,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Vault(VaultCommand::Remove { name }) => cli::vault::remove(&name),
         Command::Vault(VaultCommand::Delete { name, force }) => cli::vault::delete(&name, force),
         Command::Vault(VaultCommand::Default { name }) => cli::vault::default(&name),
-        Command::Start => {
-            // SAFETY: single-threaded at this point, before `#[tokio::main]`
-            // spawns any concurrent work that would also touch env vars.
-            unsafe {
-                std::env::set_var("OKF_MCP_TRANSPORT", "stdio");
-            }
-            run_harness_server().await
-        }
+        Command::Start => run_harness_server(Transport::Stdio, None, None, None).await,
         Command::Http {
             host,
             port,
             cors_allow,
-        } => {
-            // SAFETY: single-threaded at this point, before `#[tokio::main]`
-            // spawns any concurrent work that would also touch env vars.
-            unsafe {
-                std::env::set_var("OKF_MCP_TRANSPORT", "http");
-                if let Some(host) = &host {
-                    std::env::set_var("OKF_MCP_HOST", host);
-                }
-                if let Some(port) = port {
-                    std::env::set_var("OKF_MCP_PORT", port.to_string());
-                }
-                if let Some(cors_allow) = &cors_allow {
-                    std::env::set_var("OKF_MCP_CORS_ALLOW", cors_allow);
-                }
-            }
-            run_harness_server().await
-        }
+        } => run_harness_server(Transport::Http, host, port, cors_allow).await,
         Command::TestConnection => cli::test_connection::run().await,
         Command::Config => cli::config::run(vault),
         Command::Version => cli::version::run(),

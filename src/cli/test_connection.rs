@@ -212,29 +212,24 @@ mod tests {
 
     #[test]
     fn a_key_bearing_provider_with_no_env_var_or_credential_is_not_configured() {
-        // SAFETY: test-only env mutation; this var name is unique to this test.
-        unsafe {
-            std::env::remove_var("OKF_TEST_TC_UNCONFIGURED_KEY");
-        }
-        assert!(!provider_is_configured(
-            "groq-test-unconfigured",
-            Some("OKF_TEST_TC_UNCONFIGURED_KEY")
-        ));
+        // This var name is unique to this test; `temp_env::with_var_unset`
+        // also serializes against every other `temp_env` call in the crate.
+        temp_env::with_var_unset("OKF_TEST_TC_UNCONFIGURED_KEY", || {
+            assert!(!provider_is_configured(
+                "groq-test-unconfigured",
+                Some("OKF_TEST_TC_UNCONFIGURED_KEY")
+            ));
+        });
     }
 
     #[test]
     fn a_key_bearing_provider_with_a_meaningfully_set_env_var_is_configured() {
-        // SAFETY: test-only env mutation; this var name is unique to this test.
-        unsafe {
-            std::env::set_var("OKF_TEST_TC_CONFIGURED_KEY", "real-value");
-        }
-        assert!(provider_is_configured(
-            "groq-test-configured",
-            Some("OKF_TEST_TC_CONFIGURED_KEY")
-        ));
-        unsafe {
-            std::env::remove_var("OKF_TEST_TC_CONFIGURED_KEY");
-        }
+        temp_env::with_var("OKF_TEST_TC_CONFIGURED_KEY", Some("real-value"), || {
+            assert!(provider_is_configured(
+                "groq-test-configured",
+                Some("OKF_TEST_TC_CONFIGURED_KEY")
+            ));
+        });
     }
 
     #[test]

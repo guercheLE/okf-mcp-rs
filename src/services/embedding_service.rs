@@ -77,76 +77,51 @@ mod tests {
 
     #[test]
     fn resolve_models_cache_dir_prefers_an_explicit_fastembed_cache_dir_env_var() {
-        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // SAFETY: test-only env mutation, serialized by the guard above.
-        unsafe {
-            std::env::set_var("FASTEMBED_CACHE_DIR", "/explicit/cache/dir");
-        }
-        assert_eq!(
-            resolve_models_cache_dir(),
-            PathBuf::from("/explicit/cache/dir")
-        );
-        unsafe {
-            std::env::remove_var("FASTEMBED_CACHE_DIR");
-        }
+        // `temp_env::with_var` serializes against every other `temp_env`
+        // call in the crate — including the `HOME`-mutating tests in
+        // `config_manager.rs`/`credential_storage.rs`/`driver.rs` — for the
+        // whole closure, so no separate cross-file lock is needed.
+        temp_env::with_var("FASTEMBED_CACHE_DIR", Some("/explicit/cache/dir"), || {
+            assert_eq!(
+                resolve_models_cache_dir(),
+                PathBuf::from("/explicit/cache/dir")
+            );
+        });
     }
 
     #[test]
     fn resolve_models_cache_dir_falls_back_to_home_when_the_env_var_is_unset() {
-        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: test-only env mutation, serialized by the guard above.
-        unsafe {
-            std::env::remove_var("FASTEMBED_CACHE_DIR");
-            std::env::set_var("HOME", dir.path());
-        }
-
-        assert_eq!(
-            resolve_models_cache_dir(),
-            dir.path().join(".okf-mcp/models")
+        temp_env::with_vars(
+            [
+                ("FASTEMBED_CACHE_DIR", None::<&str>),
+                ("HOME", Some(dir.path().to_str().unwrap())),
+            ],
+            || {
+                assert_eq!(
+                    resolve_models_cache_dir(),
+                    dir.path().join(".okf-mcp/models")
+                );
+            },
         );
-
-        unsafe {
-            match prev_home {
-                Some(prev) => std::env::set_var("HOME", prev),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     #[test]
     fn resolve_models_cache_dir_is_absolute_and_not_the_relative_default_when_home_is_unset() {
-        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        // SAFETY: test-only env mutation, serialized by the guard above.
-        unsafe {
-            std::env::remove_var("FASTEMBED_CACHE_DIR");
-            std::env::remove_var("HOME");
-            std::env::remove_var("USERPROFILE");
-        }
-
-        let resolved = resolve_models_cache_dir();
-        assert!(
-            resolved.is_absolute(),
-            "expected an absolute path, got {resolved:?}"
+        temp_env::with_vars(
+            [
+                ("FASTEMBED_CACHE_DIR", None::<&str>),
+                ("HOME", None::<&str>),
+                ("USERPROFILE", None::<&str>),
+            ],
+            || {
+                let resolved = resolve_models_cache_dir();
+                assert!(
+                    resolved.is_absolute(),
+                    "expected an absolute path, got {resolved:?}"
+                );
+                assert_ne!(resolved, PathBuf::from(".fastembed_cache"));
+            },
         );
-        assert_ne!(resolved, PathBuf::from(".fastembed_cache"));
-
-        unsafe {
-            if let Some(prev) = prev_home {
-                std::env::set_var("HOME", prev);
-            }
-            if let Some(prev) = prev_userprofile {
-                std::env::set_var("USERPROFILE", prev);
-            }
-        }
     }
 }

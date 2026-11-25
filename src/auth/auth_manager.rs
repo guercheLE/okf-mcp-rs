@@ -361,25 +361,18 @@ mod tests {
         // process env var — no other test in this module reaches
         // `credentials_from_env` (they all seed cached credentials first
         // via `set_credentials`), so nothing else touches this var.
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var(FIRECRAWL_PAT_ENV);
-        }
-        assert!(credentials_from_env(AuthMethod::Pat).is_none());
+        // `temp_env::with_var_unset` also serializes against every other
+        // `temp_env` call in the crate.
+        temp_env::with_var_unset(FIRECRAWL_PAT_ENV, || {
+            assert!(credentials_from_env(AuthMethod::Pat).is_none());
+        });
 
-        // SAFETY: same test, same var.
-        unsafe {
-            std::env::set_var(FIRECRAWL_PAT_ENV, "test-pat-value");
-        }
-        let config = credentials_from_env(AuthMethod::Pat).unwrap();
-        assert_eq!(
-            config.get("token").map(String::as_str),
-            Some("test-pat-value")
-        );
-
-        // SAFETY: same test, same var.
-        unsafe {
-            std::env::remove_var(FIRECRAWL_PAT_ENV);
-        }
+        temp_env::with_var(FIRECRAWL_PAT_ENV, Some("test-pat-value"), || {
+            let config = credentials_from_env(AuthMethod::Pat).unwrap();
+            assert_eq!(
+                config.get("token").map(String::as_str),
+                Some("test-pat-value")
+            );
+        });
     }
 }

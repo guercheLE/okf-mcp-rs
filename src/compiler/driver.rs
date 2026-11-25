@@ -732,32 +732,18 @@ pub async fn compile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::credential_storage::HOME_ENV_TEST_LOCK;
 
     /// Runs `f` with `HOME` redirected to a fresh temp dir, so
     /// `vault_provider_options_for_provider`'s process-level
     /// `custom_providers` fallback (which reads `~/.okf-mcp/config.yml`)
     /// can't pick up whatever real global config happens to exist on the
-    /// machine running these tests. Serialized via the same
-    /// `HOME_ENV_TEST_LOCK` `config_manager.rs`'s and
-    /// `credential_storage.rs`'s own `HOME`-mutating tests already share.
+    /// machine running these tests. `temp_env::with_var` serializes this
+    /// against every other `temp_env` call in the crate — including
+    /// `config_manager.rs`'s and `credential_storage.rs`'s own
+    /// `HOME`-mutating tests — for the whole closure.
     fn with_isolated_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = HOME_ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: test-only env mutation, serialized by HOME_ENV_TEST_LOCK.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-        }
-        let result = f(dir.path());
-        // SAFETY: same guard as above.
-        unsafe {
-            match prev_home {
-                Some(prev) => std::env::set_var("HOME", prev),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        result
+        temp_env::with_var("HOME", Some(dir.path()), || f(dir.path()))
     }
 
     #[test]
@@ -1507,33 +1493,24 @@ mod tests {
         .to_string()
     }
 
-    /// Sets an env var to a dummy, meaningfully-non-blank value before
-    /// `f` runs, then removes it — used to seed the synthetic/overridden
-    /// API-key env var these tests' ad-hoc OpenAI-compatible provider
-    /// resolves to, so `resolve_provider_target`'s
-    /// `seed_env_from_credential_storage` short-circuits on
+    /// Sets an env var to a dummy, meaningfully-non-blank value for the
+    /// duration of `fut` — used to seed the synthetic/overridden API-key
+    /// env var these tests' ad-hoc OpenAI-compatible provider resolves to,
+    /// so `resolve_provider_target`'s `resolve_api_key` short-circuits on
     /// `env_var_is_meaningfully_set` and never touches the real OS
     /// keychain (the exact hang this task's `--skip` flags route around
     /// for other, pre-existing tests).
     ///
     /// Takes the not-yet-polled future itself (constructing an `async`
     /// block/fn call never runs its body — only polling, i.e. `.await`,
-    /// does) rather than a closure returning one: awaiting `fut` here,
-    /// before removing the env var, is what guarantees the var is still
-    /// set for the whole call, including the `.await` points inside it —
-    /// a closure returning the future without this function itself
-    /// awaiting it would remove the var before the future is ever polled.
+    /// does) rather than a closure returning one: `async_with_vars`
+    /// awaiting `fut` itself, before restoring the env var, is what
+    /// guarantees the var is still set for the whole call, including the
+    /// `.await` points inside it — a closure returning the future without
+    /// awaiting it would let the var be restored before the future is
+    /// ever polled.
     async fn with_dummy_api_key<T>(env_var: &str, fut: impl Future<Output = T>) -> T {
-        // SAFETY: test-only env mutation; each caller below uses a unique
-        // env var name, so this can't race with another test's env var.
-        unsafe {
-            std::env::set_var(env_var, "dummy-test-key");
-        }
-        let result = fut.await;
-        unsafe {
-            std::env::remove_var(env_var);
-        }
-        result
+        temp_env::async_with_vars([(env_var, Some("dummy-test-key"))], fut).await
     }
 
     /// (1) The "happy path" through `compile_one_source`: a superseded raw

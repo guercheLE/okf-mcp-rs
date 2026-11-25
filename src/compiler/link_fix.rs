@@ -421,15 +421,21 @@ mod tests {
     #[tokio::test]
     async fn fix_broken_links_synthesizes_a_missing_concept_via_a_mocked_openai_compatible_provider()
      {
-        // SAFETY: test-only env mutation; this var name is unique to this
-        // test so it can't race with other tests touching real provider
-        // vars — see `resolve_provider_target`'s auth resolution, which
-        // requires this to be set (to anything) for the OpenAI adapter to
-        // build an `Authorization` header at all.
-        unsafe {
-            std::env::set_var("OKF_TEST_LINK_FIX_API_KEY", "test-key");
-        }
+        // This var name is unique to this test so it can't race with other
+        // tests touching real provider vars — see `resolve_provider_target`'s
+        // auth resolution, which requires this to be set (to anything) for
+        // the OpenAI adapter to build an `Authorization` header at all.
+        // `temp_env::async_with_vars` holds the var for the whole `.await`'d
+        // body below and serializes against every other `temp_env` call in
+        // the crate.
+        temp_env::async_with_vars(
+            [("OKF_TEST_LINK_FIX_API_KEY", Some("test-key"))],
+            run_fix_broken_links_synthesizes_a_missing_concept(),
+        )
+        .await;
+    }
 
+    async fn run_fix_broken_links_synthesizes_a_missing_concept() {
         let vault = tempfile::tempdir().unwrap();
         write_concept(vault.path(), "a", &["/raw/raw_aaa.md"], "See [[missing]].");
         std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -462,10 +468,6 @@ mod tests {
                 .unwrap()
                 .contains("Synthesized from raw_aaa")
         );
-
-        unsafe {
-            std::env::remove_var("OKF_TEST_LINK_FIX_API_KEY");
-        }
     }
 
     #[test]

@@ -204,26 +204,13 @@ mod tests {
     /// cascade now loads successfully instead of erroring.
     #[test]
     fn an_entirely_empty_cascade_loads_successfully_with_defaults() {
-        // Serialized with `credential_storage`'s HOME-mutating tests —
-        // see that lock's doc comment for why this matters.
-        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // Pinning `HOME` via `temp_env` (rather than a raw `unsafe`
+        // mutation) serializes this against every other `temp_env` call in
+        // the crate — including `credential_storage`'s HOME-mutating tests
+        // — for the whole closure, so no separate cross-file lock is
+        // needed.
         let temp_dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", temp_dir.path());
-        }
-        let config = load_config(Map::new());
-        if let Some(prev) = prev_home {
-            unsafe {
-                std::env::set_var("HOME", prev);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("HOME");
-            }
-        }
+        let config = temp_env::with_var("HOME", Some(temp_dir.path()), || load_config(Map::new()));
         let config = config.unwrap();
         assert_eq!(config.url, "");
         assert_eq!(config.firecrawl_base_url, "https://api.firecrawl.dev");
@@ -249,21 +236,14 @@ mod tests {
 
     #[test]
     fn env_overrides_reads_the_canonical_firecrawl_url_env_var_and_has_no_auth_method_entry() {
-        // Serialized against every other test in this crate that calls
-        // `load_config`/`env_overrides` and asserts a specific value — env
-        // vars are process-global, so an unguarded mutation here could
-        // race with e.g. `an_entirely_empty_cascade_loads_successfully_with_defaults`.
-        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // SAFETY: test-only env mutation, serialized by the guard above.
-        unsafe {
-            std::env::set_var(
-                "OKF_MCP_FIRECRAWL_API_URL",
-                "https://cfgmgrtest2.example/v1",
-            );
-        }
-        let overrides = env_overrides();
+        // `temp_env::with_var` serializes against every other `temp_env`
+        // call in the crate for the whole closure, so this can't race with
+        // e.g. `an_entirely_empty_cascade_loads_successfully_with_defaults`.
+        let overrides = temp_env::with_var(
+            "OKF_MCP_FIRECRAWL_API_URL",
+            Some("https://cfgmgrtest2.example/v1"),
+            env_overrides,
+        );
         assert_eq!(
             overrides.get("firecrawl_base_url"),
             Some(&json!("https://cfgmgrtest2.example/v1"))
@@ -271,10 +251,6 @@ mod tests {
         // No entry for auth_method at all — AuthMethod has exactly one
         // variant, so no env var is read for it anymore.
         assert!(!overrides.contains_key("auth_method"));
-        // SAFETY: same guard as above.
-        unsafe {
-            std::env::remove_var("OKF_MCP_FIRECRAWL_API_URL");
-        }
     }
 
     #[test]
@@ -291,19 +267,16 @@ mod tests {
 
     #[test]
     fn custom_provider_env_overrides_parses_matching_vars_and_ignores_unrelated_ones() {
-        let _guard = crate::core::credential_storage::HOME_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // SAFETY: test-only, uniquely-named env vars scoped to this test.
-        unsafe {
-            std::env::set_var(
-                "OKF_MCP_CUSTOM_PROVIDER_CFGMGRTEST_BASE_URL",
-                "https://cfgmgrtest.example/v1",
-            );
-            std::env::set_var("OKF_MCP_LOG_LEVEL", "debug");
-        }
-
-        let overrides = custom_provider_env_overrides();
+        let overrides = temp_env::with_vars(
+            [
+                (
+                    "OKF_MCP_CUSTOM_PROVIDER_CFGMGRTEST_BASE_URL",
+                    Some("https://cfgmgrtest.example/v1"),
+                ),
+                ("OKF_MCP_LOG_LEVEL", Some("debug")),
+            ],
+            custom_provider_env_overrides,
+        );
         let providers = overrides
             .get("custom_providers")
             .and_then(|v| v.as_object())
@@ -313,12 +286,6 @@ mod tests {
             Some(&json!({ "base_url": "https://cfgmgrtest.example/v1" }))
         );
         assert!(!providers.contains_key("log_level"));
-
-        // SAFETY: same guard as above.
-        unsafe {
-            std::env::remove_var("OKF_MCP_CUSTOM_PROVIDER_CFGMGRTEST_BASE_URL");
-            std::env::remove_var("OKF_MCP_LOG_LEVEL");
-        }
     }
 
     #[test]
