@@ -20,12 +20,21 @@
 //! provider/API key needed) and let it submit the result back as a normal,
 //! user-authorized tool call — the preferred path whenever the client
 //! already has a model in the loop.
+//!
+//! Each tool's own parameter schema lives in `args`, shared supporting
+//! logic in `helpers`, and each tool's actual body in `tools` (grouped by
+//! stage: ingest, compile, search, vault) — this file is just the
+//! `#[tool_router]`'s thin dispatch, `OkfServer` itself, and the
+//! `ServerHandler` impl.
+
+pub mod args;
+pub(crate) mod helpers;
+mod tools;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicU64;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -35,349 +44,25 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, schemars, tool, tool_handler,
-    tool_router,
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
-use serde::Deserialize;
 use tokio::sync::Mutex;
 
-use crate::auth::auth_manager::{AuthManager, header_location_for};
-use crate::compiler::operations::{CompileOperation, CompilePayload, apply_operations};
-use crate::compiler::{self, CompileOptions, StoredJob, StoredJobKind};
+use crate::auth::auth_manager::AuthManager;
+use crate::compiler::StoredJob;
 use crate::core::config_schema::Config;
-use crate::core::output::Output;
-use crate::core::vault_registry::VaultRegistry;
-use crate::core::vault_resolver::{resolve_vault, sandbox_path, wiki_content_dirs};
-use crate::http::auth_extractor::extract_request_credentials;
-use crate::ingest::frontmatter::{parse_raw_frontmatter, raw_id_from_resource, resolve_raw_path};
-use crate::ingest::{self, DeleteOutcome};
-use crate::manifest;
-use crate::search;
-use crate::storage::fs_ops;
-use crate::validator::frontmatter::{SourceRef, parse_wiki_page};
-use crate::validator::rules::markdown_files_in;
-use crate::validator::{self, report as lint_report_format};
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct IngestArgs {
-    /// URL to fetch (via Firecrawl) or local file path to read
-    pub source: String,
-    /// Repeatable in effect: pass a list of tags to attach
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Vault name (from the registry) or path; defaults to the active context
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CompileArgs {
-    /// Only compile unprocessed/changed sources (default true)
-    #[serde(default)]
-    pub diff: Option<bool>,
-    /// "<provider>/<model_name>", e.g. "anthropic/claude-3-5-sonnet"
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub temperature: Option<f32>,
-    #[serde(default)]
-    pub base_url_override: Option<String>,
-    /// Repair lint issues after compiling: mechanically (missing `.md`
-    /// extensions on `sources:` entries, `tid:`/`id:` frontmatter typos)
-    /// and, for broken links, via the LLM — synthesizing a concept page for
-    /// a missing link target, grounded only in the raw sources the
-    /// referencing pages already cite
-    #[serde(default)]
-    pub fix: Option<bool>,
-    /// Compile this many sources concurrently (default 1, sequential) — see
-    /// `compiler::driver::compile`'s doc comment for the cross-linking
-    /// trade-off of raising it
-    #[serde(default)]
-    pub concurrency: Option<usize>,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RebuildArgs {
-    /// Recompile every active source, not just unprocessed ones
-    #[serde(default)]
-    pub force: Option<bool>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub temperature: Option<f32>,
-    #[serde(default)]
-    pub base_url_override: Option<String>,
-    /// Same as `CompileArgs::fix` — see its description for details
-    #[serde(default)]
-    pub fix: Option<bool>,
-    /// Same as `CompileArgs::concurrency` — see its description for details
-    #[serde(default)]
-    pub concurrency: Option<usize>,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-fn default_synthesize_batch_size() -> usize {
-    10
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SynthesizeNextArgs {
-    /// How many jobs to return in this call (default 10, capped at 50).
-    /// Batched by default, not just when asked — fewer round trips and
-    /// less token overhead for the calling client
-    #[serde(default = "default_synthesize_batch_size")]
-    pub batch_size: usize,
-    /// Only pending/changed sources (default true) — same meaning as
-    /// `CompileArgs::diff`
-    #[serde(default)]
-    pub diff: Option<bool>,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SynthesizeSubmitResult {
-    /// A `job_id` returned by a prior `okf-synthesize-next` call
-    pub job_id: String,
-    pub operations: Vec<CompileOperation>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SynthesizeSubmitArgs {
-    /// One entry per job being resolved in this call — a batch, mirroring
-    /// `okf-synthesize-next`'s own batching. One entry failing (an expired
-    /// job_id, an invalid path) does not fail the others
-    pub results: Vec<SynthesizeSubmitResult>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ModelsArgs {
-    /// anthropic, openai, groq, gemini, openrouter, deepseek, xai, together,
-    /// ollama-cloud, moonshot, ollama, foundry-local, claude-max-api-proxy,
-    /// or custom
-    pub provider: String,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LintArgs {
-    /// Also fail on warnings (orphan pages), not just broken links/sources
-    #[serde(default)]
-    pub strict: Option<bool>,
-    /// Mechanically repair auto-fixable issues (missing `.md` extensions
-    /// on `sources:` entries, `tid:`/`id:` frontmatter typos) before
-    /// reporting. Never calls an LLM — see `okf-compile`/`okf-rebuild`'s
-    /// `fix` for LLM-assisted broken-link repair
-    #[serde(default)]
-    pub fix: Option<bool>,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReindexArgs {
-    /// Also (re)compute dense-vector embeddings, not just the text index
-    #[serde(default)]
-    pub embeddings: Option<bool>,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-fn default_search_limit() -> usize {
-    5
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchArgs {
-    pub query: String,
-    #[serde(default = "default_search_limit")]
-    pub limit: usize,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct DeleteArgs {
-    pub source: String,
-    /// Hard delete: also unlinks every raw blob this source ever had
-    #[serde(default)]
-    pub purge: Option<bool>,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReadIndexArgs {
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReadConceptArgs {
-    /// A wiki page's slug (its filename without `.md`), a legacy `id:`
-    /// frontmatter value, or a vault-relative wiki path
-    pub id_or_path: String,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct TraceProvenanceArgs {
-    /// Same resolution as `okf-read-concept`'s `id_or_path`: a wiki page's
-    /// slug, a legacy `id:` frontmatter value, or a vault-relative wiki path
-    pub id_or_path: String,
-    #[serde(default)]
-    pub vault: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListVaultsArgs {}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ExploreArgs {
-    #[serde(default)]
-    pub vault: Option<String>,
-    /// Also launch the machine's default browser at the explorer URL
-    /// (default: true). The URL is returned either way.
-    #[serde(default)]
-    pub open: Option<bool>,
-    /// Port to listen on; omitted/0 picks a free one
-    #[serde(default)]
-    pub port: Option<u16>,
-}
-
-/// A pending job never submitted within this long is dropped — a safety
-/// net against an abandoned client session leaking memory forever, not
-/// something normal use should ever hit.
-const SYNTHESIZE_JOB_TTL: Duration = Duration::from_secs(30 * 60);
-/// If the map still exceeds this many entries after the TTL sweep, the
-/// oldest are evicted down to this count — bounds worst-case memory even
-/// under a pathological client that never submits anything.
-const SYNTHESIZE_JOB_CAP: usize = 500;
-
-/// Checked lazily at the top of both `okf-synthesize-next` and
-/// `okf-synthesize-submit` — no background task/timer needed, since a
-/// session that never calls either tool again has nothing left to evict
-/// anyway.
-fn evict_stale_and_excess_synthesize_jobs(jobs: &mut HashMap<String, StoredJob>) {
-    let now = Instant::now();
-    jobs.retain(|_, job| now.duration_since(job.created_at) < SYNTHESIZE_JOB_TTL);
-
-    if jobs.len() > SYNTHESIZE_JOB_CAP {
-        let mut by_age: Vec<(String, Instant)> = jobs
-            .iter()
-            .map(|(id, job)| (id.clone(), job.created_at))
-            .collect();
-        by_age.sort_by_key(|(_, created_at)| *created_at);
-        let excess = jobs.len() - SYNTHESIZE_JOB_CAP;
-        for (id, _) in by_age.into_iter().take(excess) {
-            jobs.remove(&id);
-        }
-    }
-}
-
-/// Resolves `id_or_path` against `wiki/concepts/` and `wiki/entities/`.
-/// Tries, in order: (1) a direct sandboxed path hit; (2) a filename-stem
-/// match — the spec-correct behavior, since an OKF document's ID is just
-/// its own file path minus `.md`, no frontmatter field needed; (3) the
-/// legacy `id:` frontmatter field (now optional and no longer generated),
-/// for content compiled before this repo stopped writing it. (2) never
-/// needs to read a file's content, so it's tried across every candidate
-/// before falling back to (3), which does.
-fn find_concept_path(vault_root: &Path, id_or_path: &str) -> anyhow::Result<PathBuf> {
-    if let Ok(candidate) = sandbox_path(vault_root, id_or_path)
-        && candidate.is_file()
-    {
-        return Ok(candidate);
-    }
-
-    let mut content_paths = Vec::new();
-    for (dir, _kind) in wiki_content_dirs(vault_root) {
-        content_paths.extend(markdown_files_in(&dir)?);
-    }
-
-    for path in &content_paths {
-        if path.file_stem().and_then(|stem| stem.to_str()) == Some(id_or_path) {
-            return Ok(path.clone());
-        }
-    }
-
-    for path in &content_paths {
-        let content = std::fs::read_to_string(path)?;
-        if let Ok(parsed) = parse_wiki_page(&content)
-            && let Some(id) = parsed.frontmatter.id.as_deref()
-            && (id == id_or_path || id == format!("concept_{id_or_path}"))
-        {
-            return Ok(path.clone());
-        }
-    }
-
-    anyhow::bail!("no wiki concept found for '{id_or_path}'")
-}
-
-/// Traces one `sources:` entry back to its raw blob and current manifest
-/// status, for `okf-trace-provenance`. Never propagates an error: a
-/// malformed `resource` value, a `raw_id` whose file can't be found, or a
-/// raw file whose own frontmatter fails to parse all report as
-/// `"UNRESOLVABLE"` (with a `reason`) rather than failing the whole call —
-/// one bad citation on a page shouldn't hide every other source's
-/// provenance. A raw file that resolves fine but was never (or is no
-/// longer) tracked in this vault's manifest — e.g. dropped in by hand —
-/// reports `"UNTRACKED"` rather than a false `"ACTIVE"`.
-fn trace_source(
-    vault_root: &Path,
-    manifest: &manifest::Manifest,
-    source: &SourceRef,
-) -> serde_json::Value {
-    let unresolvable = |raw_id: Option<&str>, reason: &str| {
-        serde_json::json!({
-            "resource": source.resource,
-            "raw_id": raw_id,
-            "source_url": null,
-            "checksum": null,
-            "ingested_at": null,
-            "manifest_status": { "status": "UNRESOLVABLE", "reason": reason },
-        })
-    };
-
-    let Some(raw_id) = raw_id_from_resource(&source.resource) else {
-        return unresolvable(None, "could not extract a raw_id from this resource value");
-    };
-
-    let raw_path = match resolve_raw_path(vault_root, &raw_id) {
-        Ok(path) => path,
-        Err(_) => return unresolvable(Some(&raw_id), "no raw file found for this raw_id"),
-    };
-
-    let raw_frontmatter = match std::fs::read_to_string(&raw_path)
-        .map_err(anyhow::Error::from)
-        .and_then(|content| parse_raw_frontmatter(&content))
-    {
-        Ok(frontmatter) => frontmatter,
-        Err(_) => {
-            return unresolvable(Some(&raw_id), "raw file's frontmatter could not be parsed");
-        }
-    };
-
-    let manifest_status = match manifest.find_version(&raw_id) {
-        Some((_uri, version)) => serde_json::to_value(&version.status)
-            .unwrap_or_else(|_| serde_json::json!({ "status": "UNTRACKED" })),
-        None => serde_json::json!({ "status": "UNTRACKED" }),
-    };
-
-    serde_json::json!({
-        "resource": source.resource,
-        "raw_id": raw_id,
-        "source_url": raw_frontmatter.source_url,
-        "checksum": raw_frontmatter.checksum,
-        "ingested_at": raw_frontmatter.ingested_at,
-        "manifest_status": manifest_status,
-    })
-}
+use args::{
+    CompileArgs, DeleteArgs, ExploreArgs, IngestArgs, LintArgs, ListVaultsArgs, ModelsArgs,
+    ReadConceptArgs, ReadIndexArgs, RebuildArgs, ReindexArgs, SearchArgs, SynthesizeNextArgs,
+    SynthesizeSubmitArgs, TraceProvenanceArgs,
+};
+// Re-exported (privately) so `tests.rs`'s `use super::*;` keeps reaching
+// these, unchanged from when they all lived directly in this file.
+#[cfg(test)]
+use args::SynthesizeSubmitResult;
+#[cfg(test)]
+use helpers::{apply_arg_overrides, evict_stale_and_excess_synthesize_jobs};
 
 /// Shared state every tool method needs. `Clone` because rmcp constructs
 /// one instance per session (see `http::server::start_http_server`'s
@@ -391,9 +76,9 @@ pub struct OkfServer {
     /// `okf-synthesize-submit`, keyed by job ID — scoped to this one
     /// session (matches `auth_manager`'s own per-session lifetime, per
     /// `OkfServer::new` being called once per connection). Evicted lazily
-    /// (see `evict_stale_and_excess_synthesize_jobs`) rather than on a
-    /// background timer, so an abandoned session can't leak memory forever
-    /// without needing any extra task/thread.
+    /// (see `helpers::evict_stale_and_excess_synthesize_jobs`) rather than
+    /// on a background timer, so an abandoned session can't leak memory
+    /// forever without needing any extra task/thread.
     synthesize_jobs: Arc<Mutex<HashMap<String, StoredJob>>>,
     /// Backs `okf-synthesize-next`'s job IDs. A plain counter, not a random
     /// token: job IDs are pure in-memory correlation handles for this one
@@ -425,118 +110,26 @@ impl OkfServer {
     )]
     async fn ingest(
         &self,
-        Parameters(args): Parameters<IngestArgs>,
+        args: Parameters<IngestArgs>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let config = self.config.clone();
-        let auth_manager = self.auth_manager.clone();
-        let request_credentials = extract_http_request_credentials(&context, &config);
-
-        self.run_tool("okf-ingest", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let mut auth_manager = auth_manager.lock().await;
-            let report = ingest::process_ingest(
-                &args.source,
-                &args.tags,
-                &vault_root,
-                &config,
-                &mut auth_manager,
-                request_credentials.as_ref(),
-            )
-            .await?;
-            Ok(serde_json::json!({
-                "source_uri": report.source_uri,
-                "outcome": format!("{:?}", report.outcome),
-                "raw_path": report.raw_path,
-            }))
-        })
-        .await
+        tools::ingest::ingest(self, args, context).await
     }
 
     #[tool(
         name = "okf-compile",
         description = "Compile newly-ingested raw sources into wiki concept/entity pages. Requires a configured LLM provider (see okf-mcp setup). If you (the calling MCP client) have your own LLM and would rather not configure a separate provider, use okf-synthesize-next/okf-synthesize-submit instead."
     )]
-    async fn compile(
-        &self,
-        Parameters(args): Parameters<CompileArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let transport = self.config.transport;
-        self.run_tool("okf-compile", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
-            // Start from the vault's `.okf/config.toml`-derived options (this
-            // is what actually populates `max_tokens`/`api_key_env_override`
-            // — see `compiler::vault_provider_options`), then let any
-            // explicit MCP args override individual fields. Mirrors the CLI
-            // path (`cli::compile::run`/`cli::rebuild::run`), which already
-            // does the same thing — without this, `.okf/config.toml`'s
-            // `[compiler].max_tokens` never reached MCP-triggered compiles.
-            let vault_options = compiler::vault_provider_options(&vault_root, &model_spec)?;
-            let options = apply_arg_overrides(
-                vault_options,
-                args.temperature,
-                args.base_url_override,
-                args.concurrency,
-            );
-            let diff_only = args.diff.unwrap_or(true);
-            let output = Output::for_transport(transport);
-            let mut report =
-                compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
-                    .await?;
-            let (mechanical_fix, link_fix) = apply_fix_if_requested(
-                &vault_root,
-                &model_spec,
-                &options,
-                &output,
-                args.fix.unwrap_or(false),
-                &mut report,
-            )
-            .await?;
-            compile_report_to_json(&report, mechanical_fix.as_ref(), link_fix.as_ref())
-        })
-        .await
+    async fn compile(&self, args: Parameters<CompileArgs>) -> Result<CallToolResult, McpError> {
+        tools::compile::compile(self, args).await
     }
 
     #[tool(
         name = "okf-rebuild",
         description = "Recompile the wiki from all active raw sources. Requires a configured LLM provider (see okf-mcp setup). If you (the calling MCP client) have your own LLM and would rather not configure a separate provider, use okf-synthesize-next/okf-synthesize-submit instead."
     )]
-    async fn rebuild(
-        &self,
-        Parameters(args): Parameters<RebuildArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let transport = self.config.transport;
-        self.run_tool("okf-rebuild", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let model_spec = compiler::resolve_model_spec(&vault_root, args.model.as_deref())?;
-            // See the matching comment in `compile` above — same
-            // vault-config-first, args-override-second precedence as the
-            // CLI's `cli::rebuild::run`.
-            let vault_options = compiler::vault_provider_options(&vault_root, &model_spec)?;
-            let options = apply_arg_overrides(
-                vault_options,
-                args.temperature,
-                args.base_url_override,
-                args.concurrency,
-            );
-            let diff_only = !args.force.unwrap_or(false);
-            let output = Output::for_transport(transport);
-            let mut report =
-                compiler::compile(&vault_root, &model_spec, diff_only, &options, Some(&output))
-                    .await?;
-            let (mechanical_fix, link_fix) = apply_fix_if_requested(
-                &vault_root,
-                &model_spec,
-                &options,
-                &output,
-                args.fix.unwrap_or(false),
-                &mut report,
-            )
-            .await?;
-            compile_report_to_json(&report, mechanical_fix.as_ref(), link_fix.as_ref())
-        })
-        .await
+    async fn rebuild(&self, args: Parameters<RebuildArgs>) -> Result<CallToolResult, McpError> {
+        tools::compile::rebuild(self, args).await
     }
 
     #[tool(
@@ -545,57 +138,9 @@ impl OkfServer {
     )]
     async fn synthesize_next(
         &self,
-        Parameters(args): Parameters<SynthesizeNextArgs>,
+        args: Parameters<SynthesizeNextArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let jobs_map = self.synthesize_jobs.clone();
-        let counter = self.synthesize_job_counter.clone();
-        self.run_tool("okf-synthesize-next", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let batch_size = args.batch_size.clamp(1, 50);
-            let diff_only = args.diff.unwrap_or(true);
-
-            let next_job_id = move || {
-                let id = counter.fetch_add(1, Ordering::Relaxed);
-                format!("job-{id}")
-            };
-
-            let batch =
-                compiler::next_batch(&vault_root, batch_size, diff_only, next_job_id).await?;
-
-            let jobs_json: Vec<serde_json::Value> = batch
-                .jobs
-                .iter()
-                .map(|(job, _)| {
-                    serde_json::json!({
-                        "job_id": job.job_id,
-                        "kind": job.kind.as_str(),
-                        "prompt": job.prompt,
-                    })
-                })
-                .collect();
-            let skipped_json: Vec<serde_json::Value> = batch
-                .skipped
-                .iter()
-                .map(|s| serde_json::json!({ "slug": s.slug, "reason": s.reason }))
-                .collect();
-
-            {
-                let mut jobs_map = jobs_map.lock().await;
-                evict_stale_and_excess_synthesize_jobs(&mut jobs_map);
-                for (job, stored) in batch.jobs {
-                    jobs_map.insert(job.job_id, stored);
-                }
-            }
-
-            Ok(serde_json::json!({
-                "phase": batch.phase,
-                "instructions": compiler::prompts::COMPILER_SYSTEM_PROMPT,
-                "jobs": jobs_json,
-                "skipped": skipped_json,
-                "remaining_estimate": batch.remaining_estimate,
-            }))
-        })
-        .await
+        tools::compile::synthesize_next(self, args).await
     }
 
     #[tool(
@@ -604,235 +149,49 @@ impl OkfServer {
     )]
     async fn synthesize_submit(
         &self,
-        Parameters(args): Parameters<SynthesizeSubmitArgs>,
+        args: Parameters<SynthesizeSubmitArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let jobs_map = self.synthesize_jobs.clone();
-        self.run_tool("okf-synthesize-submit", async move {
-            let mut results_json = Vec::with_capacity(args.results.len());
-            // Regenerating per-item would rewrite wiki/index.md up to N
-            // times for an N-item batch — once per distinct vault touched,
-            // after the loop, is enough (mirrors `compiler::compile`'s own
-            // "regenerate once after all sources are applied" ordering).
-            let mut vaults_to_reindex: std::collections::HashSet<PathBuf> =
-                std::collections::HashSet::new();
-            // (applied, errored) counts per vault touched by this batch —
-            // for this call's own `wiki/log.md` entry below, which (like
-            // the reindex above) is written once per vault rather than once
-            // per job.
-            let mut counts_by_vault: HashMap<PathBuf, (usize, usize)> = HashMap::new();
-
-            for result in args.results {
-                let stored = {
-                    let mut jobs_map = jobs_map.lock().await;
-                    evict_stale_and_excess_synthesize_jobs(&mut jobs_map);
-                    jobs_map.get(&result.job_id).cloned()
-                };
-
-                let Some(stored) = stored else {
-                    results_json.push(serde_json::json!({
-                        "job_id": result.job_id,
-                        "status": "error",
-                        "error": "job not found or expired",
-                    }));
-                    continue;
-                };
-
-                // Scoped so `?` stays local to this one job — one item's
-                // failure must not abort the rest of the batch.
-                let outcome: anyhow::Result<Vec<PathBuf>> = (|| {
-                    let payload = CompilePayload {
-                        operations: result.operations,
-                    };
-                    let touched = apply_operations(&stored.vault_root, &payload)?;
-                    if let StoredJobKind::Compile { uri } = &stored.kind {
-                        let mut manifest = manifest::store::load(&stored.vault_root)?;
-                        manifest.mark_compiled(uri);
-                        manifest::store::save(&stored.vault_root, &manifest)?;
-                    }
-                    Ok(touched)
-                })();
-
-                match outcome {
-                    Ok(touched_paths) => {
-                        jobs_map.lock().await.remove(&result.job_id);
-                        vaults_to_reindex.insert(stored.vault_root.clone());
-                        counts_by_vault
-                            .entry(stored.vault_root.clone())
-                            .or_default()
-                            .0 += 1;
-                        results_json.push(serde_json::json!({
-                            "job_id": result.job_id,
-                            "status": "applied",
-                            "touched_paths": touched_paths
-                                .iter()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .collect::<Vec<_>>(),
-                        }));
-                    }
-                    Err(err) => {
-                        // Left in the map (not removed) so the client can
-                        // retry with corrected output, bounded by the same
-                        // TTL/cap eviction as any other pending job.
-                        counts_by_vault
-                            .entry(stored.vault_root.clone())
-                            .or_default()
-                            .1 += 1;
-                        results_json.push(serde_json::json!({
-                            "job_id": result.job_id,
-                            "status": "error",
-                            "error": err.to_string(),
-                        }));
-                    }
-                }
-            }
-
-            // Best-effort: a page landed on disk either way even if this
-            // fails, and the next successful submit/compile against this
-            // vault regenerates the index anyway — not worth failing an
-            // otherwise-successful batch over.
-            for vault_root in &vaults_to_reindex {
-                let _ = compiler::regenerate_index(vault_root);
-            }
-            // Also best-effort, for the same reason — see `wiki_log::append`'s
-            // own doc comment. One line per vault touched by this batch,
-            // not per job, mirroring the reindex loop just above.
-            for (vault_root, (applied, errored)) in &counts_by_vault {
-                let _ = crate::storage::wiki_log::append(
-                    vault_root,
-                    "okf-synthesize-submit",
-                    if *errored == 0 { "ok" } else { "error" },
-                    &format!("{applied} job(s) applied, {errored} failed"),
-                );
-            }
-
-            Ok(serde_json::json!({ "results": results_json }))
-        })
-        .await
+        tools::compile::synthesize_submit(self, args).await
     }
 
     #[tool(
         name = "okf-list-models",
         description = "List a provider's available models (e.g. before picking a model for okf-compile)."
     )]
-    async fn list_models(
-        &self,
-        Parameters(args): Parameters<ModelsArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-list-models", async move {
-            let options = match resolve_vault(args.vault.as_deref()) {
-                Ok(vault_root) => {
-                    compiler::vault_provider_options_for_provider(&vault_root, &args.provider)?
-                }
-                Err(_) => CompileOptions::default(),
-            };
-            let models = compiler::list_models(
-                &args.provider,
-                options.base_url_override.as_deref(),
-                options.api_key_env_override.as_deref(),
-            )
-            .await?;
-            Ok(serde_json::json!({ "provider": args.provider, "models": models }))
-        })
-        .await
+    async fn list_models(&self, args: Parameters<ModelsArgs>) -> Result<CallToolResult, McpError> {
+        tools::compile::list_models(self, args).await
     }
 
     #[tool(
         name = "okf-lint",
         description = "Check wikilinks, frontmatter, and source provenance in the wiki."
     )]
-    async fn lint(
-        &self,
-        Parameters(args): Parameters<LintArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-lint", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let fix = args.fix.unwrap_or(false);
-            let (fix_report, report) = if fix {
-                let (fix_report, after_fix) = validator::fix_bundle(&vault_root)?;
-                (Some(fix_report), after_fix)
-            } else {
-                (None, validator::lint_bundle(&vault_root)?)
-            };
-            let strict = args.strict.unwrap_or(false);
-            let clean = !report.has_errors() && (!strict || report.orphan_pages.is_empty());
-            let mut value = serde_json::to_value(&report)?;
-            if let Some(object) = value.as_object_mut() {
-                object.insert("clean".to_string(), serde_json::json!(clean));
-                object.insert(
-                    "summary".to_string(),
-                    serde_json::json!(lint_report_format::to_text(&report)),
-                );
-                if let Some(fix_report) = &fix_report {
-                    object.insert(
-                        "fix".to_string(),
-                        serde_json::json!({
-                            "fixed_frontmatter_typos": fix_report.fixed_frontmatter_typos,
-                        }),
-                    );
-                }
-            }
-            Ok(value)
-        })
-        .await
+    async fn lint(&self, args: Parameters<LintArgs>) -> Result<CallToolResult, McpError> {
+        tools::search::lint(self, args).await
     }
 
     #[tool(
         name = "okf-reindex",
         description = "Rebuild the local text and vector index used by search."
     )]
-    async fn reindex(
-        &self,
-        Parameters(args): Parameters<ReindexArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let transport = self.config.transport;
-        self.run_tool("okf-reindex", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let embeddings = args.embeddings.unwrap_or(false);
-            let output = Output::for_transport(transport);
-            let report = search::reindex(&vault_root, embeddings, Some(&output))?;
-            Ok(serde_json::to_value(report)?)
-        })
-        .await
+    async fn reindex(&self, args: Parameters<ReindexArgs>) -> Result<CallToolResult, McpError> {
+        tools::search::reindex(self, args).await
     }
 
     #[tool(
         name = "okf-search",
         description = "Search ingested raw sources and compiled wiki concepts."
     )]
-    async fn search(
-        &self,
-        Parameters(args): Parameters<SearchArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-search", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let results = search::hybrid_search(&vault_root, &args.query, args.limit)?;
-            Ok(serde_json::to_value(results)?)
-        })
-        .await
+    async fn search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+        tools::search::search(self, args).await
     }
 
     #[tool(
         name = "okf-delete",
         description = "Remove a source from the vault (soft by default; purge hard-deletes)."
     )]
-    async fn delete(
-        &self,
-        Parameters(args): Parameters<DeleteArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-delete", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let purge = args.purge.unwrap_or(false);
-            let outcome =
-                ingest::delete_source(&vault_root, &args.source, purge, "deleted via okf-delete")?;
-            Ok(match outcome {
-                DeleteOutcome::Tombstoned => serde_json::json!({ "outcome": "tombstoned" }),
-                DeleteOutcome::Purged { removed_raw_ids } => serde_json::json!({
-                    "outcome": "purged",
-                    "removed_raw_ids": removed_raw_ids,
-                }),
-            })
-        })
-        .await
+    async fn delete(&self, args: Parameters<DeleteArgs>) -> Result<CallToolResult, McpError> {
+        tools::search::delete(self, args).await
     }
 
     #[tool(
@@ -841,15 +200,9 @@ impl OkfServer {
     )]
     async fn read_index(
         &self,
-        Parameters(args): Parameters<ReadIndexArgs>,
+        args: Parameters<ReadIndexArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-read-index", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let content = fs_ops::read_to_string(&vault_root, "wiki/index.md")
-                .map_err(|_| anyhow::anyhow!("no wiki/index.md yet — run okf-compile first"))?;
-            Ok(serde_json::json!({ "content": content }))
-        })
-        .await
+        tools::search::read_index(self, args).await
     }
 
     #[tool(
@@ -858,20 +211,9 @@ impl OkfServer {
     )]
     async fn read_concept(
         &self,
-        Parameters(args): Parameters<ReadConceptArgs>,
+        args: Parameters<ReadConceptArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-read-concept", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let path = find_concept_path(&vault_root, &args.id_or_path)?;
-            let content = std::fs::read_to_string(&path)?;
-            let relative = path
-                .strip_prefix(&vault_root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            Ok(serde_json::json!({ "path": relative, "content": content }))
-        })
-        .await
+        tools::search::read_concept(self, args).await
     }
 
     #[tool(
@@ -880,80 +222,17 @@ impl OkfServer {
     )]
     async fn trace_provenance(
         &self,
-        Parameters(args): Parameters<TraceProvenanceArgs>,
+        args: Parameters<TraceProvenanceArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-trace-provenance", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let path = find_concept_path(&vault_root, &args.id_or_path)?;
-            let content = std::fs::read_to_string(&path)?;
-            let parsed = parse_wiki_page(&content)?;
-            let relative = path
-                .strip_prefix(&vault_root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            let source_manifest = manifest::store::load(&vault_root)?;
-            let sources: Vec<serde_json::Value> = parsed
-                .frontmatter
-                .sources
-                .iter()
-                .map(|source| trace_source(&vault_root, &source_manifest, source))
-                .collect();
-
-            Ok(serde_json::json!({
-                "page": {
-                    "path": relative,
-                    "type": parsed.frontmatter.r#type,
-                    "title": parsed.frontmatter.title,
-                    "status": parsed.frontmatter.status,
-                    "stale_after": parsed.frontmatter.stale_after,
-                    "generated": parsed.frontmatter.generated,
-                },
-                "sources": sources,
-            }))
-        })
-        .await
+        tools::search::trace_provenance(self, args).await
     }
 
     #[tool(
         name = "okf-explore",
         description = "Start (or reuse) a local browser-based explorer for the vault — 3D link graph, note pane with backlinks, hub filtering, and search over the vault's index — and return its URL."
     )]
-    async fn explore(
-        &self,
-        Parameters(args): Parameters<ExploreArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let explorers = self.explorers.clone();
-        self.run_tool("okf-explore", async move {
-            let vault_root = resolve_vault(args.vault.as_deref())?;
-            let key = vault_root.canonicalize().unwrap_or(vault_root.clone());
-            let open = args.open.unwrap_or(true);
-            let mut explorers = explorers.lock().await;
-            if let Some(handle) = explorers.get(&key)
-                && !handle.task.is_finished()
-            {
-                if open && let Err(err) = open::that_detached(&handle.url) {
-                    tracing::warn!(error = %err, "could not open a browser");
-                }
-                return Ok(serde_json::json!({
-                    "url": handle.url,
-                    "vault_root": vault_root.display().to_string(),
-                    "already_running": true,
-                }));
-            }
-            let handle =
-                crate::explorer::serve(&vault_root, "127.0.0.1", args.port.unwrap_or(0), open)
-                    .await?;
-            let url = handle.url.clone();
-            explorers.insert(key, handle);
-            Ok(serde_json::json!({
-                "url": url,
-                "vault_root": vault_root.display().to_string(),
-                "already_running": false,
-            }))
-        })
-        .await
+    async fn explore(&self, args: Parameters<ExploreArgs>) -> Result<CallToolResult, McpError> {
+        tools::vault::explore(self, args).await
     }
 
     #[tool(
@@ -962,163 +241,10 @@ impl OkfServer {
     )]
     async fn list_vaults(
         &self,
-        Parameters(_args): Parameters<ListVaultsArgs>,
+        args: Parameters<ListVaultsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        self.run_tool("okf-list-vaults", async move {
-            let registry = VaultRegistry::load()?;
-            let vaults: Vec<serde_json::Value> = registry
-                .vaults
-                .iter()
-                .map(|(name, entry)| {
-                    serde_json::json!({
-                        "name": name,
-                        "path": entry.path,
-                        "description": entry.description,
-                        "default": registry.default.as_deref() == Some(name.as_str()),
-                    })
-                })
-                .collect();
-            Ok(serde_json::json!({ "vaults": vaults }))
-        })
-        .await
+        tools::vault::list_vaults(self, args).await
     }
-}
-
-/// `--fix`'s MCP-side counterpart to `cli::compile::report_and_commit`'s
-/// fix pass — same two tiers (mechanical, then LLM-assisted for any
-/// remaining broken links), folded into `report.lint_report` so the
-/// returned JSON reflects post-fix state. No git commit here: MCP
-/// `okf-compile`/`okf-rebuild` never commit (that's CLI-only), so there's
-/// no LLM-content-review gate to apply — the caller sees exactly what was
-/// written and decides what to do with it.
-async fn apply_fix_if_requested(
-    vault_root: &Path,
-    model_spec: &str,
-    options: &CompileOptions,
-    output: &Output,
-    fix: bool,
-    report: &mut compiler::CompileReport,
-) -> anyhow::Result<(
-    Option<validator::FixReport>,
-    Option<compiler::LinkFixReport>,
-)> {
-    if !fix {
-        return Ok((None, None));
-    }
-
-    let (mechanical, after_mechanical) = validator::fix_bundle(vault_root)?;
-    report.lint_report = after_mechanical;
-
-    let mut link_fix_report = None;
-    if !report.lint_report.broken_links.is_empty() {
-        let link_fix =
-            compiler::fix_broken_links(vault_root, model_spec, options, Some(output)).await?;
-        report.lint_report = validator::lint_bundle(vault_root)?;
-        link_fix_report = Some(link_fix);
-    }
-
-    Ok((Some(mechanical), link_fix_report))
-}
-
-/// Merges an MCP tool call's explicit `temperature`/`base_url_override`/
-/// `concurrency` args on top of the vault-config-derived `options` — shared
-/// by `compile` and `rebuild`, which otherwise duplicated this exact
-/// precedence (vault config first, an explicit `Some` arg wins,
-/// `concurrency` defaults to `1` when not given). Pure and synchronous so
-/// the precedence itself can be unit-tested without a vault/LLM.
-fn apply_arg_overrides(
-    mut options: CompileOptions,
-    temperature: Option<f32>,
-    base_url_override: Option<String>,
-    concurrency: Option<usize>,
-) -> CompileOptions {
-    if temperature.is_some() {
-        options.temperature = temperature;
-    }
-    if base_url_override.is_some() {
-        options.base_url_override = base_url_override;
-    }
-    options.concurrency = concurrency.unwrap_or(1);
-    options
-}
-
-fn compile_report_to_json(
-    report: &compiler::CompileReport,
-    mechanical_fix: Option<&validator::FixReport>,
-    link_fix: Option<&compiler::LinkFixReport>,
-) -> anyhow::Result<serde_json::Value> {
-    let mut value = serde_json::json!({
-        "sources_processed": report.sources_processed(),
-        "sources_failed": report.sources_failed(),
-        "sources": report.sources.iter().map(|s| serde_json::json!({
-            "uri": s.uri,
-            "raw_id": s.raw_id,
-            "error": s.error,
-        })).collect::<Vec<_>>(),
-        "touched_paths": report.touched_paths,
-        "lint": {
-            "clean": !report.lint_report.has_errors(),
-            "broken_links": report.lint_report.broken_links.len(),
-            "missing_sources": report.lint_report.missing_sources.len(),
-            "orphan_pages": report.lint_report.orphan_pages.len(),
-        },
-    });
-
-    if let Some(object) = value.as_object_mut() {
-        if let Some(mechanical) = mechanical_fix {
-            object.insert(
-                "fix".to_string(),
-                serde_json::json!({
-                    "fixed_frontmatter_typos": mechanical.fixed_frontmatter_typos,
-                }),
-            );
-        }
-        if let Some(link_fix) = link_fix {
-            let outcomes: Vec<serde_json::Value> = link_fix
-                .outcomes
-                .iter()
-                .map(|outcome| {
-                    let status = match &outcome.status {
-                        compiler::LinkFixStatus::Synthesized => "synthesized".to_string(),
-                        compiler::LinkFixStatus::SkippedNoSourceContext => {
-                            "skipped_no_source_context".to_string()
-                        }
-                        compiler::LinkFixStatus::Failed(err) => format!("failed: {err}"),
-                    };
-                    serde_json::json!({ "slug": outcome.slug, "status": status })
-                })
-                .collect();
-            object.insert(
-                "link_fix".to_string(),
-                serde_json::json!({
-                    "synthesized": link_fix.synthesized_slugs(),
-                    "outcomes": outcomes,
-                }),
-            );
-        }
-    }
-
-    Ok(value)
-}
-
-/// HTTP transport only: extracts this call's own per-request credentials
-/// for Firecrawl (rmcp injects the originating `http::request::Parts` into
-/// `context.extensions` per JSON-RPC message — see
-/// `http::server::auth_gate`'s doc comment for why this, not a
-/// `tokio::task_local!`, is the mechanism that actually works here).
-/// `None` on stdio, where no such extension is ever inserted — stdio calls
-/// fall back to local config/keychain inside `AuthManager` itself.
-fn extract_http_request_credentials(
-    context: &RequestContext<RoleServer>,
-    config: &Config,
-) -> Option<crate::auth::request_credentials::RequestCredentials> {
-    context
-        .extensions
-        .get::<axum::http::request::Parts>()
-        .and_then(|parts| {
-            let (header_location, header_name) = header_location_for(config.auth_method);
-            extract_request_credentials(&parts.headers, header_location, header_name).ok()
-        })
 }
 
 impl OkfServer {
@@ -1182,724 +308,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::config_schema::AuthMethod;
-    use rmcp::model::CallToolRequestParams;
-
-    #[derive(Debug, Clone, Default)]
-    struct TestClient;
-
-    impl rmcp::ClientHandler for TestClient {}
-
-    fn server() -> OkfServer {
-        let config: Config = serde_json::from_value(serde_json::json!({
-            "auth_method": "pat"
-        }))
-        .unwrap();
-        OkfServer::new(
-            config,
-            Arc::new(Mutex::new(AuthManager::new(AuthMethod::Pat))),
-        )
-    }
-
-    fn tool_json(result: &CallToolResult) -> serde_json::Value {
-        let text = &result.content[0].as_text().unwrap().text;
-        serde_json::from_str(text).unwrap()
-    }
-
-    fn write_raw(vault_root: &Path, raw_id: &str, content: &str) {
-        let dir = vault_root.join("raw");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(format!("{raw_id}.md")), content).unwrap();
-    }
-
-    /// Writes a real raw blob (proper `RawFrontmatter`, via `write_raw_blob`)
-    /// and registers it in `manifest` — `record_ingest` plus the
-    /// `record_raw_path` step `ingest::pipeline::process_ingest` normally
-    /// does right after writing — so `okf-trace-provenance`'s manifest-status
-    /// join has something real to find. Callers still need to
-    /// `manifest::store::save` the manifest themselves once done.
-    fn ingest_raw(
-        vault_root: &Path,
-        manifest: &mut manifest::Manifest,
-        uri: &str,
-        raw_id: &str,
-        content: &str,
-    ) {
-        let hash = format!("sha256:{raw_id}");
-        manifest.record_ingest(uri, &hash, raw_id, "t0");
-        let path = crate::ingest::frontmatter::write_raw_blob(
-            vault_root,
-            raw_id,
-            uri,
-            &[],
-            &hash,
-            "t0",
-            content,
-        )
-        .unwrap();
-        // Built from the file name, not `path.strip_prefix(vault_root)` —
-        // `write_raw_blob` canonicalizes the vault root internally
-        // (`sandbox_path`), which can silently fail to strip on a host
-        // where the vault lives under a symlink (e.g. macOS's `/var` ->
-        // `/private/var`); `ingest::pipeline::process_ingest` uses the same
-        // approach for the same reason.
-        let raw_path = path
-            .file_name()
-            .map(|name| format!("raw/{}", name.to_string_lossy()))
-            .unwrap_or_else(|| format!("raw/{raw_id}.md"));
-        manifest.record_raw_path(uri, raw_id, raw_path);
-    }
-
-    fn write_wiki_page_citing(
-        vault_root: &Path,
-        slug: &str,
-        extra_frontmatter: &str,
-        resource: &str,
-    ) {
-        let dir = vault_root.join("wiki/concepts");
-        std::fs::create_dir_all(&dir).unwrap();
-        let content = format!(
-            "---\ntype: concept\ntitle: \"{slug}\"\n{extra_frontmatter}sources:\n  - resource: \"{resource}\"\n---\n\n# {slug}\n"
-        );
-        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
-    }
-
-    #[test]
-    fn evict_stale_and_excess_synthesize_jobs_removes_entries_past_the_ttl() {
-        let mut jobs = HashMap::new();
-        jobs.insert(
-            "stale".to_string(),
-            StoredJob {
-                vault_root: PathBuf::from("/vault"),
-                kind: StoredJobKind::Fix {
-                    slug: "x".to_string(),
-                },
-                created_at: Instant::now() - SYNTHESIZE_JOB_TTL - Duration::from_secs(1),
-            },
-        );
-        jobs.insert(
-            "fresh".to_string(),
-            StoredJob {
-                vault_root: PathBuf::from("/vault"),
-                kind: StoredJobKind::Fix {
-                    slug: "y".to_string(),
-                },
-                created_at: Instant::now(),
-            },
-        );
-
-        evict_stale_and_excess_synthesize_jobs(&mut jobs);
-
-        assert!(!jobs.contains_key("stale"));
-        assert!(jobs.contains_key("fresh"));
-    }
-
-    #[test]
-    fn evict_stale_and_excess_synthesize_jobs_caps_total_count_evicting_oldest_first() {
-        let mut jobs = HashMap::new();
-        let now = Instant::now();
-        for i in 0..(SYNTHESIZE_JOB_CAP + 3) {
-            jobs.insert(
-                format!("job-{i}"),
-                StoredJob {
-                    vault_root: PathBuf::from("/vault"),
-                    kind: StoredJobKind::Fix {
-                        slug: "x".to_string(),
-                    },
-                    // Earlier index = older (created further in the past).
-                    created_at: now - Duration::from_secs((SYNTHESIZE_JOB_CAP + 3 - i) as u64),
-                },
-            );
-        }
-
-        evict_stale_and_excess_synthesize_jobs(&mut jobs);
-
-        assert_eq!(jobs.len(), SYNTHESIZE_JOB_CAP);
-        // The 3 oldest (lowest index) must be the ones evicted.
-        assert!(!jobs.contains_key("job-0"));
-        assert!(!jobs.contains_key("job-1"));
-        assert!(!jobs.contains_key("job-2"));
-        assert!(jobs.contains_key(&format!("job-{}", SYNTHESIZE_JOB_CAP + 2)));
-    }
-
-    #[tokio::test]
-    async fn synthesize_next_then_submit_compiles_a_pending_source_and_marks_it_compiled() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        write_raw(vault.path(), "raw_aaa", "Some content about widgets.");
-        let mut manifest = manifest::Manifest::default();
-        manifest.record_ingest("uri-a", "sha256:aaa", "raw_aaa", "t0");
-        manifest::store::save(vault.path(), &manifest).unwrap();
-
-        let server = server();
-        let vault_path = vault.path().to_str().unwrap().to_string();
-
-        let next = server
-            .synthesize_next(Parameters(SynthesizeNextArgs {
-                batch_size: 10,
-                diff: None,
-                vault: Some(vault_path.clone()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(next.is_error, Some(false));
-        let next_body = tool_json(&next);
-        assert_eq!(next_body["phase"], "compile");
-        assert!(
-            next_body["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("Content Routing")
-        );
-        let jobs = next_body["jobs"].as_array().unwrap();
-        assert_eq!(jobs.len(), 1);
-        let job_id = jobs[0]["job_id"].as_str().unwrap().to_string();
-        assert_eq!(jobs[0]["kind"], "compile");
-        assert!(jobs[0]["prompt"].as_str().unwrap().contains("widgets"));
-
-        let submit = server
-            .synthesize_submit(Parameters(SynthesizeSubmitArgs {
-                results: vec![SynthesizeSubmitResult {
-                    job_id,
-                    operations: vec![CompileOperation::CreateOrUpdate {
-                        path: "wiki/concepts/widgets.md".to_string(),
-                        content: "---\ntype: Pattern\ntitle: \"Widgets\"\nsources:\n  - resource: \"/raw/raw_aaa.md\"\n---\n\n# Widgets\n"
-                            .to_string(),
-                    }],
-                }],
-            }))
-            .await
-            .unwrap();
-        assert_eq!(submit.is_error, Some(false));
-        let submit_body = tool_json(&submit);
-        let results = submit_body["results"].as_array().unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["status"], "applied");
-
-        assert!(vault.path().join("wiki/concepts/widgets.md").is_file());
-        let saved_manifest = manifest::store::load(vault.path()).unwrap();
-        assert!(saved_manifest.is_compiled_at_current_hash("uri-a"));
-
-        // A successful submit must regenerate wiki/index.md — the same
-        // step `compiler::compile` runs at the end of its own pipeline,
-        // which okf-synthesize-submit has to trigger itself since it never
-        // goes through `compile()`.
-        let index = fs_ops::read_to_string(vault.path(), "wiki/index.md").unwrap();
-        assert!(index.contains("okf_version"));
-        assert!(index.contains("Widgets"));
-
-        // Also logged — one line per vault touched by this batch.
-        let log = fs_ops::read_to_string(vault.path(), "wiki/log.md").unwrap();
-        assert!(log.contains("[okf-synthesize-submit] ok: 1 job(s) applied, 0 failed"));
-
-        // A second next call has nothing left to compile and no broken
-        // links to fix — straight to done.
-        let done = server
-            .synthesize_next(Parameters(SynthesizeNextArgs {
-                batch_size: 10,
-                diff: None,
-                vault: Some(vault_path),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(tool_json(&done)["phase"], "done");
-    }
-
-    #[tokio::test]
-    async fn synthesize_submit_isolates_an_unknown_job_id_from_the_rest_of_the_batch() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        write_raw(vault.path(), "raw_aaa", "content");
-        let mut manifest = manifest::Manifest::default();
-        manifest.record_ingest("uri-a", "sha256:aaa", "raw_aaa", "t0");
-        manifest::store::save(vault.path(), &manifest).unwrap();
-
-        let server = server();
-        let next = server
-            .synthesize_next(Parameters(SynthesizeNextArgs {
-                batch_size: 10,
-                diff: None,
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        let job_id = tool_json(&next)["jobs"][0]["job_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let submit = server
-            .synthesize_submit(Parameters(SynthesizeSubmitArgs {
-                results: vec![
-                    SynthesizeSubmitResult {
-                        job_id: "does-not-exist".to_string(),
-                        operations: vec![],
-                    },
-                    SynthesizeSubmitResult {
-                        job_id,
-                        operations: vec![CompileOperation::CreateOrUpdate {
-                            path: "wiki/concepts/a.md".to_string(),
-                            content: "---\ntype: concept\ntitle: \"a\"\n---\n\n# a\n".to_string(),
-                        }],
-                    },
-                ],
-            }))
-            .await
-            .unwrap();
-        assert_eq!(submit.is_error, Some(false));
-        let results = tool_json(&submit)["results"].clone();
-        let results = results.as_array().unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0]["status"], "error");
-        assert!(
-            results[0]["error"]
-                .as_str()
-                .unwrap()
-                .contains("not found or expired")
-        );
-        assert_eq!(results[1]["status"], "applied");
-    }
-
-    #[test]
-    fn apply_arg_overrides_passes_vault_options_through_unchanged_except_concurrency_defaults_to_one()
-     {
-        let vault_options = CompileOptions {
-            temperature: Some(0.2),
-            base_url_override: Some("https://vault.example/v1".to_string()),
-            api_key_env_override: Some("VAULT_KEY_ENV".to_string()),
-            max_tokens: Some(4096),
-            concurrency: 7, // not what vault_provider_options ever sets, but
-                            // proves this field is always overwritten below
-        };
-        let options = apply_arg_overrides(vault_options, None, None, None);
-        assert_eq!(options.temperature, Some(0.2));
-        assert_eq!(
-            options.base_url_override.as_deref(),
-            Some("https://vault.example/v1")
-        );
-        assert_eq!(
-            options.api_key_env_override.as_deref(),
-            Some("VAULT_KEY_ENV")
-        );
-        assert_eq!(options.max_tokens, Some(4096));
-        assert_eq!(options.concurrency, 1);
-    }
-
-    #[test]
-    fn apply_arg_overrides_lets_an_explicit_temperature_win_over_the_vault_derived_value() {
-        let vault_options = CompileOptions {
-            temperature: Some(0.2),
-            ..CompileOptions::default()
-        };
-        let options = apply_arg_overrides(vault_options, Some(0.9), None, None);
-        assert_eq!(options.temperature, Some(0.9));
-    }
-
-    #[test]
-    fn apply_arg_overrides_lets_an_explicit_base_url_override_win() {
-        let vault_options = CompileOptions {
-            base_url_override: Some("https://vault.example/v1".to_string()),
-            ..CompileOptions::default()
-        };
-        let options = apply_arg_overrides(
-            vault_options,
-            None,
-            Some("https://arg.example/v1".to_string()),
-            None,
-        );
-        assert_eq!(
-            options.base_url_override.as_deref(),
-            Some("https://arg.example/v1")
-        );
-    }
-
-    #[test]
-    fn apply_arg_overrides_uses_an_explicit_concurrency_value_instead_of_the_default() {
-        let options = apply_arg_overrides(CompileOptions::default(), None, None, Some(5));
-        assert_eq!(options.concurrency, 5);
-    }
-
-    #[test]
-    fn server_info_advertises_the_fixed_tool_set_not_a_discovery_layer() {
-        let info = server().get_info();
-        assert_eq!(info.protocol_version, ProtocolVersion::V_2024_11_05);
-        assert!(info.capabilities.tools.is_some());
-        let instructions = info.instructions.unwrap();
-        assert!(instructions.contains("okf-search"));
-        assert!(!instructions.to_lowercase().contains("semantic database"));
-    }
-
-    #[tokio::test]
-    async fn run_tool_formats_successes_and_failures_consistently() {
-        let server = server();
-        let success = server
-            .run_tool("coverage", async { Ok(serde_json::json!({ "ok": true })) })
-            .await
-            .unwrap();
-        assert_eq!(success.is_error, Some(false));
-        let failure = server
-            .run_tool("coverage", async { anyhow::bail!("coverage failure") })
-            .await
-            .unwrap();
-        assert_eq!(failure.is_error, Some(true));
-    }
-
-    #[tokio::test]
-    async fn lint_and_search_and_list_vaults_work_against_an_empty_vault() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        let vault_path = vault.path().to_str().unwrap().to_string();
-
-        let server = server();
-        let lint = server
-            .lint(Parameters(LintArgs {
-                strict: None,
-                fix: None,
-                vault: Some(vault_path.clone()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(lint.is_error, Some(false));
-
-        let search = server
-            .search(Parameters(SearchArgs {
-                query: "anything".to_string(),
-                limit: 5,
-                vault: Some(vault_path),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(search.is_error, Some(false));
-
-        let vaults = server
-            .list_vaults(Parameters(ListVaultsArgs {}))
-            .await
-            .unwrap();
-        assert_eq!(vaults.is_error, Some(false));
-    }
-
-    #[tokio::test]
-    async fn read_index_errors_clearly_when_nothing_has_been_compiled_yet() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        let server = server();
-        let result = server
-            .read_index(Parameters(ReadIndexArgs {
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-    }
-
-    #[tokio::test]
-    async fn read_concept_resolves_an_entity_page_by_slug_with_no_id_field() {
-        // New-shape page: no `id:`/`okf_version:` frontmatter, lives under
-        // wiki/entities/ (not wiki/concepts/) — proves find_concept_path's
-        // filename-stem match reaches the second content directory.
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        let dir = vault.path().join("wiki/entities");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("ada-lovelace.md"),
-            "---\ntype: Person\ntitle: \"Ada Lovelace\"\n---\n\n# Ada Lovelace\n",
-        )
-        .unwrap();
-
-        let server = server();
-        let result = server
-            .read_concept(Parameters(ReadConceptArgs {
-                id_or_path: "ada-lovelace".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(false));
-    }
-
-    #[tokio::test]
-    async fn trace_provenance_reports_an_active_source_and_the_pages_own_lifecycle_fields() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-
-        let mut manifest = manifest::Manifest::default();
-        ingest_raw(
-            vault.path(),
-            &mut manifest,
-            "https://example.com/a",
-            "raw_aaa",
-            "# Doc\n\nBody.",
-        );
-        manifest::store::save(vault.path(), &manifest).unwrap();
-
-        write_wiki_page_citing(
-            vault.path(),
-            "widgets",
-            "status: draft\nstale_after: \"2026-12-31\"\ngenerated: { by: \"okf-mcp-compiler\", at: \"t0\" }\n",
-            "/raw/raw_aaa.md",
-        );
-
-        let server = server();
-        let result = server
-            .trace_provenance(Parameters(TraceProvenanceArgs {
-                id_or_path: "widgets".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(false));
-
-        let body = tool_json(&result);
-        assert_eq!(body["page"]["path"], "wiki/concepts/widgets.md");
-        assert_eq!(body["page"]["status"], "draft");
-        assert_eq!(body["page"]["stale_after"], "2026-12-31");
-        assert_eq!(body["page"]["generated"]["by"], "okf-mcp-compiler");
-
-        let sources = body["sources"].as_array().unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0]["raw_id"], "raw_aaa");
-        assert_eq!(sources[0]["source_url"], "https://example.com/a");
-        assert_eq!(sources[0]["checksum"], "sha256:raw_aaa");
-        assert_eq!(sources[0]["manifest_status"]["status"], "ACTIVE");
-    }
-
-    #[tokio::test]
-    async fn trace_provenance_reports_a_superseded_sources_replacement() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-
-        let mut manifest = manifest::Manifest::default();
-        ingest_raw(
-            vault.path(),
-            &mut manifest,
-            "uri",
-            "raw_aaa",
-            "# Old\n\nBody.",
-        );
-        ingest_raw(
-            vault.path(),
-            &mut manifest,
-            "uri",
-            "raw_bbb",
-            "# New\n\nBody.",
-        );
-        manifest::store::save(vault.path(), &manifest).unwrap();
-
-        // Cites the now-superseded version on purpose — this is exactly the
-        // case a bare raw blob's own frontmatter can't tell you about.
-        write_wiki_page_citing(vault.path(), "stale-fact", "", "/raw/raw_aaa.md");
-
-        let server = server();
-        let result = server
-            .trace_provenance(Parameters(TraceProvenanceArgs {
-                id_or_path: "stale-fact".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(false));
-
-        let body = tool_json(&result);
-        let sources = body["sources"].as_array().unwrap();
-        assert_eq!(sources[0]["manifest_status"]["status"], "SUPERSEDED");
-        assert_eq!(sources[0]["manifest_status"]["by_raw_id"], "raw_bbb");
-    }
-
-    #[tokio::test]
-    async fn trace_provenance_reports_tombstoned_and_the_reason() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-
-        let mut manifest = manifest::Manifest::default();
-        ingest_raw(
-            vault.path(),
-            &mut manifest,
-            "uri",
-            "raw_aaa",
-            "# Old\n\nBody.",
-        );
-        manifest.tombstone("uri", "deprecated", "t1").unwrap();
-        manifest::store::save(vault.path(), &manifest).unwrap();
-
-        write_wiki_page_citing(vault.path(), "gone", "", "/raw/raw_aaa.md");
-
-        let server = server();
-        let result = server
-            .trace_provenance(Parameters(TraceProvenanceArgs {
-                id_or_path: "gone".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        let body = tool_json(&result);
-        let sources = body["sources"].as_array().unwrap();
-        assert_eq!(sources[0]["manifest_status"]["status"], "TOMBSTONED");
-        assert_eq!(sources[0]["manifest_status"]["reason"], "deprecated");
-    }
-
-    #[tokio::test]
-    async fn trace_provenance_reports_untracked_for_a_raw_file_never_ingested_via_the_manifest() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-
-        // A raw blob written directly, never recorded in the manifest (e.g.
-        // dropped in by hand) — must not be misreported as ACTIVE.
-        crate::ingest::frontmatter::write_raw_blob(
-            vault.path(),
-            "raw_aaa",
-            "https://example.com/a",
-            &[],
-            "sha256:aaa",
-            "t0",
-            "# Doc\n\nBody.",
-        )
-        .unwrap();
-        write_wiki_page_citing(vault.path(), "untracked", "", "/raw/raw_aaa.md");
-
-        let server = server();
-        let result = server
-            .trace_provenance(Parameters(TraceProvenanceArgs {
-                id_or_path: "untracked".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        let body = tool_json(&result);
-        let sources = body["sources"].as_array().unwrap();
-        assert_eq!(sources[0]["manifest_status"]["status"], "UNTRACKED");
-    }
-
-    #[tokio::test]
-    async fn trace_provenance_reports_unresolvable_for_a_source_with_no_matching_raw_file() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        write_wiki_page_citing(vault.path(), "dangling", "", "/raw/raw_missing.md");
-
-        let server = server();
-        let result = server
-            .trace_provenance(Parameters(TraceProvenanceArgs {
-                id_or_path: "dangling".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(false));
-
-        let body = tool_json(&result);
-        let sources = body["sources"].as_array().unwrap();
-        assert_eq!(sources[0]["raw_id"], "raw_missing");
-        assert_eq!(sources[0]["manifest_status"]["status"], "UNRESOLVABLE");
-    }
-
-    #[tokio::test]
-    async fn trace_provenance_errors_clearly_for_an_unknown_page() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-
-        let server = server();
-        let result = server
-            .trace_provenance(Parameters(TraceProvenanceArgs {
-                id_or_path: "does-not-exist".to_string(),
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-    }
-
-    #[tokio::test]
-    async fn delete_of_a_never_ingested_source_is_a_tool_error_not_a_panic() {
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-        let server = server();
-        let result = server
-            .delete(Parameters(DeleteArgs {
-                source: "https://example.com/never-ingested".to_string(),
-                purge: None,
-                vault: Some(vault.path().to_str().unwrap().to_string()),
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-    }
-
-    // Wrapped in an overall timeout: a hang anywhere below (e.g. the
-    // in-process server task panicking mid-request, which leaves the
-    // client awaiting a response that will never arrive) would otherwise
-    // run until CI's own job-level timeout killed it, hours later.
-    #[tokio::test]
-    async fn mcp_protocol_exposes_the_full_hyphenated_tool_set() {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            mcp_protocol_exposes_the_full_hyphenated_tool_set_inner(),
-        )
-        .await
-        .expect(
-            "mcp protocol test timed out after 30s — the server task likely panicked mid-request",
-        );
-    }
-
-    async fn mcp_protocol_exposes_the_full_hyphenated_tool_set_inner() {
-        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
-        let server_task = tokio::spawn(async move {
-            server().serve(server_transport).await?.waiting().await?;
-            anyhow::Ok(())
-        });
-        let client = TestClient.serve(client_transport).await.unwrap();
-
-        let mut tools: Vec<String> = client
-            .list_all_tools()
-            .await
-            .unwrap()
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        tools.sort();
-        assert_eq!(
-            tools,
-            vec![
-                "okf-compile",
-                "okf-delete",
-                "okf-explore",
-                "okf-ingest",
-                "okf-lint",
-                "okf-list-models",
-                "okf-list-vaults",
-                "okf-read-concept",
-                "okf-read-index",
-                "okf-rebuild",
-                "okf-reindex",
-                "okf-search",
-                "okf-synthesize-next",
-                "okf-synthesize-submit",
-                "okf-trace-provenance",
-            ]
-        );
-
-        let vault = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(vault.path().join(".okf")).unwrap();
-
-        let lint = client
-            .call_tool(
-                CallToolRequestParams::new("okf-lint").with_arguments(
-                    serde_json::json!({ "vault": vault.path().to_str().unwrap() })
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(lint.is_error, Some(false));
-
-        drop(client);
-        tokio::time::timeout(std::time::Duration::from_secs(2), server_task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-    }
-}
+mod tests;
